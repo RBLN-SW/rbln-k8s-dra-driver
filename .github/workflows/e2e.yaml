@@ -1,0 +1,149 @@
+name: E2E Tests
+
+on:
+  workflow_call:
+    inputs:
+      image_repository:
+        type: string
+        description: Full image repository used for helm install
+        required: true
+      image_tag:
+        type: string
+        description: Image tag used for helm install
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: dra-ci-k8s
+    timeout-minutes: 60
+    env:
+      IMAGE_REPOSITORY: ${{ inputs.image_repository }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install helm chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm upgrade -i \
+            --create-namespace \
+            --wait \
+            --timeout 600s \
+            --namespace k8s-dra-driver-npu \
+            --set webhook.enabled=true \
+            --set image.repository="${IMAGE_REPOSITORY}" \
+            --set image.tag="${IMAGE_TAG}" \
+            --set image.pullPolicy=Always \
+            k8s-dra-driver-npu \
+            ./deployments/helm/k8s-dra-driver-npu
+
+      - name: Test cluster-and-webhook
+        id: tc_cluster_and_webhook
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/cluster-and-webhook.sh
+
+      - name: Test two-pods-single-npu
+        id: tc_two_pods_single_npu
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/two-pods-single-npu.sh
+
+      - name: Test single-pod-double-npu
+        id: tc_single_pod_double_npu
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/single-pod-double-npu.sh
+
+      - name: Test three-pods-two-device-contention
+        id: tc_three_pods_two_device_contention
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/three-pods-two-device-contention.sh
+
+      - name: Test multi-container-shared-claim
+        id: tc_multi_container_shared_claim
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/multi-container-shared-claim.sh
+
+      - name: Test reclaim-after-release
+        id: tc_reclaim_after_release
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/reclaim-after-release.sh
+
+      - name: Test two-pods-shared-resourceclaim
+        id: tc_two_pods_shared_resourceclaim
+        continue-on-error: true
+        shell: bash
+        run: bash test/e2e/cases/two-pods-shared-resourceclaim.sh
+
+      - name: Dump debug info for failed test cases
+        if: always()
+        shell: bash
+        env:
+          TC_CLUSTER_AND_WEBHOOK: ${{ steps.tc_cluster_and_webhook.outcome }}
+          TC_TWO_PODS_SINGLE_NPU: ${{ steps.tc_two_pods_single_npu.outcome }}
+          TC_SINGLE_POD_DOUBLE_NPU: ${{ steps.tc_single_pod_double_npu.outcome }}
+          TC_THREE_PODS_TWO_DEVICE_CONTENTION: ${{ steps.tc_three_pods_two_device_contention.outcome }}
+          TC_MULTI_CONTAINER_SHARED_CLAIM: ${{ steps.tc_multi_container_shared_claim.outcome }}
+          TC_RECLAIM_AFTER_RELEASE: ${{ steps.tc_reclaim_after_release.outcome }}
+          TC_TWO_PODS_SHARED_RESOURCECLAIM: ${{ steps.tc_two_pods_shared_resourceclaim.outcome }}
+        run: |
+          set -euo pipefail
+          outcomes="${TC_CLUSTER_AND_WEBHOOK} ${TC_TWO_PODS_SINGLE_NPU} ${TC_SINGLE_POD_DOUBLE_NPU} ${TC_THREE_PODS_TWO_DEVICE_CONTENTION} ${TC_MULTI_CONTAINER_SHARED_CLAIM} ${TC_RECLAIM_AFTER_RELEASE} ${TC_TWO_PODS_SHARED_RESOURCECLAIM}"
+          if [[ "${outcomes}" != *"failure"* ]]; then
+            echo "No failed test case."
+            exit 0
+          fi
+
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.metadata.creationTimestamp | tail -n 300 || true
+          kubectl get resourceclaims.resource.k8s.io -A || true
+          kubectl get resourceclaimtemplates.resource.k8s.io -A || true
+
+      - name: Teardown e2e environment
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash test/e2e/teardown-e2e.sh
+
+      - name: Fail job if any test case failed
+        if: always()
+        shell: bash
+        env:
+          TC_CLUSTER_AND_WEBHOOK: ${{ steps.tc_cluster_and_webhook.outcome }}
+          TC_TWO_PODS_SINGLE_NPU: ${{ steps.tc_two_pods_single_npu.outcome }}
+          TC_SINGLE_POD_DOUBLE_NPU: ${{ steps.tc_single_pod_double_npu.outcome }}
+          TC_THREE_PODS_TWO_DEVICE_CONTENTION: ${{ steps.tc_three_pods_two_device_contention.outcome }}
+          TC_MULTI_CONTAINER_SHARED_CLAIM: ${{ steps.tc_multi_container_shared_claim.outcome }}
+          TC_RECLAIM_AFTER_RELEASE: ${{ steps.tc_reclaim_after_release.outcome }}
+          TC_TWO_PODS_SHARED_RESOURCECLAIM: ${{ steps.tc_two_pods_shared_resourceclaim.outcome }}
+        run: |
+          set -euo pipefail
+
+          failed_cases=()
+          [[ "${TC_CLUSTER_AND_WEBHOOK}" == "failure" ]] && failed_cases+=("cluster-and-webhook")
+          [[ "${TC_TWO_PODS_SINGLE_NPU}" == "failure" ]] && failed_cases+=("two-pods-single-npu")
+          [[ "${TC_SINGLE_POD_DOUBLE_NPU}" == "failure" ]] && failed_cases+=("single-pod-double-npu")
+          [[ "${TC_THREE_PODS_TWO_DEVICE_CONTENTION}" == "failure" ]] && failed_cases+=("three-pods-two-device-contention")
+          [[ "${TC_MULTI_CONTAINER_SHARED_CLAIM}" == "failure" ]] && failed_cases+=("multi-container-shared-claim")
+          [[ "${TC_RECLAIM_AFTER_RELEASE}" == "failure" ]] && failed_cases+=("reclaim-after-release")
+          [[ "${TC_TWO_PODS_SHARED_RESOURCECLAIM}" == "failure" ]] && failed_cases+=("two-pods-shared-resourceclaim")
+
+          if [[ ${#failed_cases[@]} -gt 0 ]]; then
+            echo "Failed test cases: ${failed_cases[*]}"
+            exit 1
+          fi
+
+          echo "All test cases passed"

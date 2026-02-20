@@ -1,0 +1,19 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "k8s-dra-driver-npu.fullname" . }}-webhook
+  namespace: {{ include "k8s-dra-driver-npu.namespace" . }}
+  labels:
+    {{- include "k8s-dra-driver-npu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  selector:
+    {{- include "k8s-dra-driver-npu.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+  ports:
+  - name: webhook
+    protocol: TCP
+    port: {{ .Values.webhook.servicePort }}
+    targetPort: webhook
+{{- end }}

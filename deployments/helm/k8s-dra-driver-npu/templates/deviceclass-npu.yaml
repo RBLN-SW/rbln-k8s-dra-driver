@@ -1,0 +1,10 @@
+---
+apiVersion: {{ include "k8s-dra-driver-npu.resourceApiVersion" . }}
+kind: DeviceClass
+metadata:
+  name: npu.rebellions.ai
+spec:
+  selectors:
+  - cel:
+      expression: 'device.driver == {{ include "k8s-dra-driver-npu.driverName" . | quote }}'
+  extendedResourceName: rebellions.ai/npu
