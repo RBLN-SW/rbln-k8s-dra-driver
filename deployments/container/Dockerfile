@@ -14,13 +14,15 @@
 
 ARG GOLANG_VERSION=undefined
 ARG BASE_IMAGE=undefined
+ARG VERSION=N/A
 FROM golang:${GOLANG_VERSION} AS build
+ARG VERSION
 
 WORKDIR /build
 COPY . .
 
 RUN mkdir /artifacts
-RUN make PREFIX=/artifacts cmds
+RUN make PREFIX=/artifacts VERSION="${VERSION}" cmd-npu-kubelet-plugin cmd-webhook
 
 FROM ${BASE_IMAGE}
 
