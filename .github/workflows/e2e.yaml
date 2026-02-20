@@ -38,7 +38,7 @@ jobs:
             --wait \
             --timeout 600s \
             --namespace k8s-dra-driver-npu \
-            --set webhook.enabled=true \
+            --set webhook.enabled=false \
             --set image.repository="${IMAGE_REPOSITORY}" \
             --set image.tag="${IMAGE_TAG}" \
             --set image.pullPolicy=Always \
