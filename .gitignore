@@ -5,4 +5,3 @@ driver_image.tar
 *.tgz
 
 **/.DS_Store
-npu-kubelet-plugin
