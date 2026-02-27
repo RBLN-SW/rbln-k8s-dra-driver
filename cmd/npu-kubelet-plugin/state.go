@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -34,7 +35,8 @@ import (
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/rblnlib"
+	"github.com/rbln-sw/rblnlib-go/pkg/device"
+	"github.com/rbln-sw/rblnlib-go/pkg/rsdgroup"
 )
 
 type AllocatableDevices map[string]resourceapi.Device
@@ -82,7 +84,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		driverResources:   driverResources,
 		allocatable:       allocatable,
 		checkpointManager: checkpointManager,
-		rsdGroupFn:        rblnlib.RecreateRsdGroup,
+		rsdGroupFn:        rsdgroup.RecreateRsdGroup,
 	}
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
@@ -90,10 +92,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
 	}
 
-	for _, c := range checkpoints {
-		if c == DriverPluginCheckpointFile {
-			return state, nil
-		}
+	if slices.Contains(checkpoints, DriverPluginCheckpointFile) {
+		return state, nil
 	}
 
 	checkpoint := newCheckpoint()
@@ -117,7 +117,8 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
-		return preparedClaims[claimUID].GetDevices(), nil
+		return preparedClaims[claimUID].
+			GetDevices(), nil
 	}
 
 	preparedDevices, err := s.prepareDevices(claim)
@@ -283,7 +284,7 @@ func (s *DeviceState) getPCIBusIDs(results []*resourceapi.DeviceRequestAllocatio
 }
 
 func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.DriverResources, AllocatableDevices, error) {
-	devs, err := rblnlib.GetDevices(ctx)
+	devs, err := device.GetDevices(ctx)
 	if err != nil {
 		return resourceslice.DriverResources{}, nil, err
 	}
