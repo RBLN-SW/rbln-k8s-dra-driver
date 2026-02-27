@@ -34,7 +34,8 @@ import (
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/rblnlib"
+	"github.com/rbln-sw/rblnlib-go/pkg/device"
+	"github.com/rbln-sw/rblnlib-go/pkg/rsdgroup"
 )
 
 type AllocatableDevices map[string]resourceapi.Device
@@ -82,7 +83,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		driverResources:   driverResources,
 		allocatable:       allocatable,
 		checkpointManager: checkpointManager,
-		rsdGroupFn:        rblnlib.RecreateRsdGroup,
+		rsdGroupFn:        rsdgroup.RecreateRsdGroup,
 	}
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
@@ -283,7 +284,7 @@ func (s *DeviceState) getPCIBusIDs(results []*resourceapi.DeviceRequestAllocatio
 }
 
 func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.DriverResources, AllocatableDevices, error) {
-	devs, err := rblnlib.GetDevices(ctx)
+	devs, err := device.GetDevices(ctx)
 	if err != nil {
 		return resourceslice.DriverResources{}, nil, err
 	}
