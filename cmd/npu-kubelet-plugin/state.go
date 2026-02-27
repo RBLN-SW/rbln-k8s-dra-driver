@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -91,10 +92,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
 	}
 
-	for _, c := range checkpoints {
-		if c == DriverPluginCheckpointFile {
-			return state, nil
-		}
+	if slices.Contains(checkpoints, DriverPluginCheckpointFile) {
+		return state, nil
 	}
 
 	checkpoint := newCheckpoint()
@@ -118,7 +117,8 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
-		return preparedClaims[claimUID].GetDevices(), nil
+		return preparedClaims[claimUID].
+			GetDevices(), nil
 	}
 
 	preparedDevices, err := s.prepareDevices(claim)
