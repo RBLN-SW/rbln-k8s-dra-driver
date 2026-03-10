@@ -3,7 +3,7 @@ module github.com/RBLN-SW/k8s-dra-driver-npu
 go 1.25.7
 
 require (
-	github.com/rbln-sw/rblnlib-go v0.1.0
+	github.com/rbln-sw/rblnlib-go v0.2.0
 	github.com/spf13/pflag v1.0.9
 	github.com/urfave/cli/v2 v2.25.3
 	google.golang.org/grpc v1.72.2

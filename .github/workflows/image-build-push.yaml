@@ -25,7 +25,7 @@ on:
 
 jobs:
   image-build-push:
-    runs-on: dra-ci-k8s
+    runs-on: sw-cloud-cluster-ci
     steps:
       - uses: actions/checkout@v4
       - name: Login to registry

@@ -45,6 +45,8 @@ type PreparedClaims map[string]PreparedDevices
 const (
 	deviceNodePollTimeout  = 5 * time.Second
 	deviceNodePollInterval = 100 * time.Millisecond
+	pciBusIDAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pciBusID")
+	pcieRootAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pcieRoot")
 )
 
 type DeviceState struct {
@@ -274,9 +276,9 @@ func (s *DeviceState) getPCIBusIDs(results []*resourceapi.DeviceRequestAllocatio
 	busIDs := make([]string, 0, len(results))
 	for _, result := range results {
 		device := s.allocatable[result.Device]
-		attr, ok := device.Attributes["pciBusID"]
+		attr, ok := device.Attributes[pciBusIDAttributeKey]
 		if !ok || attr.StringValue == nil || *attr.StringValue == "" {
-			return nil, fmt.Errorf("allocatable device %q is missing attribute pciBusID", result.Device)
+			return nil, fmt.Errorf("allocatable device %q is missing attribute %s", result.Device, pciBusIDAttributeKey)
 		}
 		busIDs = append(busIDs, *attr.StringValue)
 	}
@@ -308,8 +310,11 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 			"pciDeviceID": {
 				StringValue: ptr.To(d.PCIDeviceID),
 			},
-			"pciBusID": {
+			pciBusIDAttributeKey: {
 				StringValue: ptr.To(d.PCIBusID),
+			},
+			pcieRootAttributeKey: {
+				StringValue: ptr.To(d.PCIERootID),
 			},
 			"pciLinkSpeed": {
 				StringValue: ptr.To(d.PCILinkSpeed),
