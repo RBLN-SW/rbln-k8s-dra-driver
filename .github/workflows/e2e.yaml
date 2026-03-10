@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   e2e:
-    runs-on: dra-ci-k8s
+    runs-on: sw-cloud-cluster-ci
     timeout-minutes: 60
     env:
       IMAGE_REPOSITORY: ${{ inputs.image_repository }}
