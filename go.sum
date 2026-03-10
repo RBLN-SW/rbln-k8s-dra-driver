@@ -111,8 +111,8 @@ github.com/prometheus/common v0.66.1 h1:h5E0h5/Y8niHc5DlaLlWLArTQI7tMrsfQjHV+d9Z
 github.com/prometheus/common v0.66.1/go.mod h1:gcaUsgf3KfRSwHY4dIMXLPV0K/Wg1oZ8+SbZk/HH/dA=
 github.com/prometheus/procfs v0.16.1 h1:hZ15bTNuirocR6u0JZ6BAHHmwS1p8B4P6MRqxtzMyRg=
 github.com/prometheus/procfs v0.16.1/go.mod h1:teAbpZRB1iIAJYREa1LsoWUXykVXA1KlTmWl8x/U+Is=
-github.com/rbln-sw/rblnlib-go v0.1.0 h1:6z4kNMMiCEmacmTryhYlvcB6KHK5M343/zm0OCsUX/M=
-github.com/rbln-sw/rblnlib-go v0.1.0/go.mod h1:UFAsr6sIXnSe2BIJi2GCMm2/dHvFC+GnCkh5rwv4H0Y=
+github.com/rbln-sw/rblnlib-go v0.2.0 h1:DsSmHIOj5bFcVkMHeHCw6HTWRrH1eOzqNErO1dk81S8=
+github.com/rbln-sw/rblnlib-go v0.2.0/go.mod h1:UFAsr6sIXnSe2BIJi2GCMm2/dHvFC+GnCkh5rwv4H0Y=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/russross/blackfriday/v2 v2.1.0 h1:JIOH55/0cWyOuilr9/qlrm0BSXldqnqwMsf35Ld67mk=
