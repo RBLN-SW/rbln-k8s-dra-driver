@@ -45,6 +45,8 @@ type PreparedClaims map[string]PreparedDevices
 const (
 	deviceNodePollTimeout  = 5 * time.Second
 	deviceNodePollInterval = 100 * time.Millisecond
+	pciBusIDAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pciBusID")
+	pcieRootAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pcieRoot")
 )
 
 type DeviceState struct {
@@ -308,10 +310,10 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 			"pciDeviceID": {
 				StringValue: ptr.To(d.PCIDeviceID),
 			},
-			resourceapi.QualifiedName("resource.kubernetes.io/pciBusID"): {
+			pciBusIDAttributeKey: {
 				StringValue: ptr.To(d.PCIBusID),
 			},
-			resourceapi.QualifiedName("resource.kubernetes.io/pcieRoot"): {
+			pcieRootAttributeKey: {
 				StringValue: ptr.To(d.PCIERootID),
 			},
 			"pciLinkSpeed": {
