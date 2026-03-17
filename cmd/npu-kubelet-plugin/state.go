@@ -47,6 +47,7 @@ const (
 	deviceNodePollInterval = 100 * time.Millisecond
 	pciBusIDAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pciBusID")
 	pcieRootAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pcieRoot")
+	numaNodeAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/numaNode")
 )
 
 type DeviceState struct {
@@ -331,7 +332,7 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 		}
 		if d.PCINumaNode != "" {
 			if v, err := strconv.ParseInt(d.PCINumaNode, 10, 64); err == nil {
-				attrs["numaNode"] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
+				attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
 			}
 		}
 		device := resourceapi.Device{
