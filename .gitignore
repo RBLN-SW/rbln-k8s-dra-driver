@@ -5,3 +5,4 @@ driver_image.tar
 *.tgz
 
 **/.DS_Store
+CLAUDE.md

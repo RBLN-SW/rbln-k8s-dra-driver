@@ -9,15 +9,52 @@ permissions:
   contents: write
 
 jobs:
-  build-and-push-image:
+  build-amd64:
     uses: ./.github/workflows/image-build-push.yaml
     with:
       registry: docker.io
       image_repository: rebellions/k8s-dra-driver-npu
-      image_tag: ${{ github.ref_name }}
+      image_tag: ${{ github.ref_name }}-amd64
+      runner: ubuntu-latest
     secrets:
       registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
       registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+  build-arm64:
+    uses: ./.github/workflows/image-build-push.yaml
+    with:
+      registry: docker.io
+      image_repository: rebellions/k8s-dra-driver-npu
+      image_tag: ${{ github.ref_name }}-arm64
+      runner: ubuntu-22.04-rbln-arm
+    secrets:
+      registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+  manifest:
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: docker.io/rebellions/k8s-dra-driver-npu
+    steps:
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Create version and latest manifests
+        run: |
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${{ github.ref_name }}" \
+            "${IMAGE}:${{ github.ref_name }}-amd64" \
+            "${IMAGE}:${{ github.ref_name }}-arm64"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:${{ github.ref_name }}-amd64" \
+            "${IMAGE}:${{ github.ref_name }}-arm64"
 
 
   package-helm-chart:
@@ -46,7 +83,7 @@ jobs:
           path: dist/*.tgz
 
   draft-release:
-    needs: [build-and-push-image, package-helm-chart]
+    needs: [manifest, package-helm-chart]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
