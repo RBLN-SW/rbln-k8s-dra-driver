@@ -1,0 +1,216 @@
+# PR CI for rbln-k8s-dra-driver: build the PR image, then run the operator's
+# sentinel `dra` scenario (scenario_03_dra) with ONLY the DRA kubelet-plugin
+# operand pointed at the PR image. Everything else stays at the baseline
+# operator defaults. Replaces the GitHub Actions e2e suite — scenario_03_dra
+# ports every test/e2e/cases/*.sh case and adds CRD-status, plugin-readiness,
+# DeviceClass, per-node ResourceSlice, and DRA inference coverage.
+
+notify:
+  - github_commit_status:
+      context: "[DRA Driver] PR CI"
+
+env:
+  HARBOR_HOST: harbor.k8s.rebellions.in
+  IMAGE_REGISTRY: harbor.k8s.rebellions.in/rebellions
+  # Full image repo the build pushes to; common.mk default is
+  # <REGISTRY>/k8s-dra-driver-npu but we pin IMAGE_NAME explicitly so the
+  # sentinel override below references the exact same path.
+  IMAGE_NAME: harbor.k8s.rebellions.in/rebellions/k8s-dra-driver-npu
+  # Registry-relative repo (no host) for the sentinel DRA kubelet-plugin
+  # override — sentinel takes registry host and repository separately.
+  DRA_PLUGIN_IMAGE_REPOSITORY: rebellions/k8s-dra-driver-npu
+  BUILDX_CI_IMAGE: harbor.k8s.rebellions.in/rebellions/buildx-ci:latest
+
+  # Baseline operator chart. The DRA scenario installs the full operator stack
+  # (DRA mode) and slots our PR-built kubelet plugin in as the dra operand.
+  OPERATOR_REPO: https://github.com/RBLN-SW/rbln-npu-operator.git
+  OPERATOR_REF: "${OPERATOR_REF:-main}"
+  OPERATOR_DIR: rbln-npu-operator
+  OPERATOR_CHART_SUBPATH: deployments/rbln-npu-operator
+
+  SENTINEL_REPO: https://github.com/rebellions-sw/npu-operator-sentinel.git
+  SENTINEL_REF: "${SENTINEL_REF:-dev}"
+  SENTINEL_DIR: npu-operator-sentinel
+  SENTINEL_RUNNER_IMAGE: harbor.k8s.rebellions.in/rebellions/npu-operator-sentinel:latest
+
+  # No dedicated namespace: the shared cluster lock (dra step) serializes runs,
+  # so we use the operator's standard rbln-system.
+  TEST_NAMESPACE: "${TEST_NAMESPACE:-rbln-system}"
+
+  # The DRA scenario only overrides the kubelet-plugin operand (below); the
+  # operator + validator images are otherwise left at the chart defaults, which
+  # are placeholder appVersion images (docker.io/rebellions/rbln-npu-operator
+  # :v0.0.1, never published) and ImagePullBackOff. Pin them to the dev images
+  # the operator nightly pushes to Harbor — same as the operator/driver-manager
+  # PR pipelines.
+  SENTINEL_OPERATOR_REGISTRY: harbor.k8s.rebellions.in
+  SENTINEL_OPERATOR_REPOSITORY: rebellions/rbln-npu-operator
+  SENTINEL_OPERATOR_VERSION: "${SENTINEL_OPERATOR_VERSION:-dev}"
+  SENTINEL_OPERATOR_PULL_POLICY: Always
+  SENTINEL_VALIDATOR_REGISTRY: harbor.k8s.rebellions.in
+  SENTINEL_VALIDATOR_REPOSITORY: rebellions/rbln-npu-operator-validator
+  SENTINEL_VALIDATOR_VERSION: "${SENTINEL_VALIDATOR_VERSION:-dev}"
+  SENTINEL_VALIDATOR_PULL_POLICY: Always
+
+  # Driver/daemon chart defaults (repo.rebellions.ai) aren't pullable yet, so
+  # override to the dev registry — same values as the operator nightly.
+  SENTINEL_DRIVER_IMAGE_REGISTRY: harbor.ssw.rbln.in
+  SENTINEL_DRIVER_IMAGE_REPOSITORY: rebellions-dev/rbln-driver
+  SENTINEL_DRIVER_IMAGE_TAG: "${SENTINEL_DRIVER_IMAGE_TAG:-3.2.0}"
+  SENTINEL_RBLN_DAEMON_IMAGE_REGISTRY: harbor.ssw.rbln.in
+  SENTINEL_RBLN_DAEMON_IMAGE_REPOSITORY: rebellions-dev/rbln-daemon
+  SENTINEL_RBLN_DAEMON_IMAGE_TAG: "${SENTINEL_RBLN_DAEMON_IMAGE_TAG:-3.2.0}"
+
+agents:
+  queue: "k8s"
+
+steps:
+  # DinD: buildx-ci (docker CLI) + privileged docker:dind sidecar over DOCKER_HOST.
+  # This repo's deployments/container/Makefile uses plain `docker build`/`docker
+  # push` (not buildx --output=push), so the default `docker` driver is required
+  # — `push` reads the image from the local daemon store. Do NOT create a
+  # docker-container builder here or `make push` would find nothing to push.
+  - label: ":docker: build & push image"
+    key: build-image
+    timeout_in_minutes: 30
+    image: ${BUILDX_CI_IMAGE}
+    env:
+      DOCKER_HOST: tcp://localhost:2375
+    secrets:
+      REBEL_SW_DEV_USERNAME: REBEL_SW_DEV_USERNAME
+      REBEL_SW_DEV_PASSWORD: REBEL_SW_DEV_PASSWORD
+    plugins:
+      - kubernetes:
+          sidecars:
+            - image: harbor.k8s.rebellions.in/dockerhub-proxy/docker:dind
+              command: [dockerd-entrypoint.sh]
+              securityContext:
+                privileged: true
+              env:
+                - name: DOCKER_TLS_CERTDIR
+                  value: ""
+    notify:
+      - github_commit_status:
+          context: "[DRA Driver] Build Image"
+    command: |
+      set -euo pipefail
+
+      echo "waiting for dockerd sidecar..."
+      for i in $$(seq 1 90); do
+        docker info >/dev/null 2>&1 && break
+        sleep 2
+      done
+      if ! docker info >/dev/null 2>&1; then
+        echo "::error:: dockerd sidecar did not become ready"
+        docker info 2>&1 || true
+        exit 1
+      fi
+
+      IMAGE_TAG="$${BUILDKITE_COMMIT:0:8}"
+
+      echo "$$REBEL_SW_DEV_PASSWORD" | docker login "${HARBOR_HOST}" \
+        --username "$$REBEL_SW_DEV_USERNAME" --password-stdin
+
+      make -f deployments/container/Makefile build push \
+        IMAGE_NAME="${IMAGE_NAME}" \
+        IMAGE_TAG="$$IMAGE_TAG" \
+        VERSION="$$IMAGE_TAG"
+
+  - label: ":pytest: dra scenario"
+    key: dra
+    depends_on: build-image
+    timeout_in_minutes: 90
+    image: ${SENTINEL_RUNNER_IMAGE}
+    # Shared, cross-repo lock on the single container cluster (operator nightly,
+    # metrics-exporter PR CI, etc. use the same group): one job at a time, held
+    # from install through teardown so the next repo gets a clean cluster.
+    concurrency_group: "cloud-ci-container"
+    concurrency: 1
+    priority: 1
+    notify:
+      - github_commit_status:
+          context: "[DRA Driver] DRA Scenario"
+    secrets:
+      REBEL_SW_DEV_USERNAME: REBEL_SW_DEV_USERNAME
+      REBEL_SW_DEV_PASSWORD: REBEL_SW_DEV_PASSWORD
+      HF_TOKEN: HF_TOKEN
+      KUBECONFIG_B64: KUBECONFIG_B64
+      GIT_PAT: GIT_PAT
+    artifact_paths:
+      - "${SENTINEL_DIR}/reports/**/*"
+      - "${SENTINEL_DIR}/logs/**/*"
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+        - signal_reason: agent_stop
+          limit: 2
+      manual:
+        allowed: true
+        reason: "Flake retry"
+    command: |
+      set -euo pipefail
+
+      IMAGE_TAG="$${BUILDKITE_COMMIT:0:8}"
+      REPO_ROOT="$$(pwd)"
+
+      mkdir -p "$$HOME/.kube"
+      echo "$$KUBECONFIG_B64" | base64 -d > "$$HOME/.kube/config"
+      chmod 600 "$$HOME/.kube/config"
+      export KUBECONFIG="$$HOME/.kube/config"
+      export SENTINEL_KUBECONFIG="$$KUBECONFIG"
+
+      # We hold the cluster lock, so a full nuke (incl. cluster-scoped CRs) is
+      # safe. Run it before install too, to clear any hard-killed run's leftover.
+      nuke() {
+        helm list -n "${TEST_NAMESPACE}" -q | xargs -r -n1 helm uninstall -n "${TEST_NAMESPACE}" || true
+        kubectl delete rblnclusterpolicies --all --ignore-not-found || true
+        kubectl delete rblndrivers --all --ignore-not-found || true
+        kubectl delete namespace "${TEST_NAMESPACE}" --ignore-not-found || true
+      }
+      nuke
+
+      git config --global url."https://x-access-token:$$GIT_PAT@github.com/".insteadOf "https://github.com/"
+
+      rm -rf "${OPERATOR_DIR}"
+      git clone --depth=1 --branch "${OPERATOR_REF}" "${OPERATOR_REPO}" "${OPERATOR_DIR}"
+      HELM_CHART="$$REPO_ROOT/${OPERATOR_DIR}/${OPERATOR_CHART_SUBPATH}"
+      helm dependency update "$$HELM_CHART"
+
+      rm -rf "${SENTINEL_DIR}"
+      git clone --depth=1 --branch "${SENTINEL_REF}" "${SENTINEL_REPO}" "${SENTINEL_DIR}"
+      cd "${SENTINEL_DIR}"
+      uv sync --all-extras
+
+      # Override ONLY the DRA kubelet plugin -> the PR image; everything else
+      # stays at the baseline operator defaults.
+      export SENTINEL_DRA_KUBELET_PLUGIN_IMAGE_REGISTRY="${HARBOR_HOST}"
+      export SENTINEL_DRA_KUBELET_PLUGIN_IMAGE_REPOSITORY="${DRA_PLUGIN_IMAGE_REPOSITORY}"
+      export SENTINEL_DRA_KUBELET_PLUGIN_IMAGE_TAG="$$IMAGE_TAG"
+      export SENTINEL_DRA_KUBELET_PLUGIN_IMAGE_PULL_POLICY="Always"
+
+      # Credentials the test harness injects into the cluster:
+      #   - registry pull secret (drivercred) from these
+      #   - PyPI creds for model-zoo inference pods (rebel-compiler install)
+      # Both reuse the same REBEL_SW_DEV_* pair.
+      export SENTINEL_REGISTRY_SERVER="${HARBOR_HOST}"
+      export SENTINEL_REGISTRY_USER="$$REBEL_SW_DEV_USERNAME"
+      export SENTINEL_REGISTRY_PASSWORD="$$REBEL_SW_DEV_PASSWORD"
+      export SENTINEL_PYPI_USERNAME="$$REBEL_SW_DEV_USERNAME"
+      export SENTINEL_PYPI_PASSWORD="$$REBEL_SW_DEV_PASSWORD"
+
+      # HuggingFace token for gated model-zoo models in the DRA inference test.
+      export SENTINEL_HF_TOKEN="$$HF_TOKEN"
+
+      # Capture the result so we still tear down (nuke) before releasing the lock.
+      set +e
+      uv run sentinel run dra \
+        --helm-chart="$$HELM_CHART" \
+        --namespace="${TEST_NAMESPACE}" \
+        --reports-dir=reports \
+        --logs-dir=logs
+      rc=$$?
+      set -e
+
+      nuke
+      exit $$rc
