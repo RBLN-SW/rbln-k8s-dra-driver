@@ -35,6 +35,9 @@ const (
 	rblnRuntimeSpecFile   = "rbln.yaml"
 	rblnRuntimeSpecKind   = "rebellions.ai/npu"
 	rblnRuntimeDeviceName = "runtime"
+	rblnRDSSpecFile       = "rbln-rds.yaml"
+	rblnRDSSpecKind       = "rebellions.ai/rds"
+	rblnRDSDeviceName     = "all"
 )
 
 type CDIHandler struct {
@@ -176,6 +179,37 @@ func (cdi *CDIHandler) getRuntimeUMDEdits() ([]*cdispec.Mount, []*cdispec.Hook, 
 	}
 
 	return nil, nil, fmt.Errorf("runtime device %q not found in %s", rblnRuntimeDeviceName, specPath)
+}
+
+// getRDSDeviceNodes returns the char device nodes from the RDS CDI spec the RBLN
+// container toolkit writes (device "all"), or (nil, nil) on non-RDS hosts.
+func (cdi *CDIHandler) getRDSDeviceNodes() ([]*cdispec.DeviceNode, error) {
+	specPath := filepath.Join(cdi.root, rblnRDSSpecFile)
+	data, err := os.ReadFile(specPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read %s: %w", specPath, err)
+	}
+
+	spec, err := cdiapi.ParseSpec(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", specPath, err)
+	}
+	if spec == nil {
+		return nil, fmt.Errorf("empty RDS CDI spec in %s", specPath)
+	}
+	if spec.Kind != rblnRDSSpecKind {
+		return nil, fmt.Errorf("unexpected CDI kind %q in %s", spec.Kind, specPath)
+	}
+
+	for i := range spec.Devices {
+		if spec.Devices[i].Name == rblnRDSDeviceName {
+			return spec.Devices[i].ContainerEdits.DeviceNodes, nil
+		}
+	}
+	return nil, nil
 }
 
 func (cdi *CDIHandler) CreateClaimSpecFile(ctx context.Context, claimUID string, devices PreparedDevices) error {
