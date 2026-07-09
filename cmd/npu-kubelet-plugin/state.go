@@ -29,6 +29,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
+	"k8s.io/klog/v2"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/utils/ptr"
@@ -199,11 +200,20 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		hostRsdPath = s.rsdGroupFn(busIDs)
 	}
 
+	rdsNodes, err := s.cdi.getRDSDeviceNodes()
+	if err != nil {
+		klog.Warningf("reading RDS CDI spec failed for claim %s, continuing without RDS: %v", claim.UID, err)
+	}
+
 	var preparedDevices PreparedDevices
-	for _, result := range results {
+	for i, result := range results {
 		edits, err := s.applyConfig(result.Device, hostRsdPath)
 		if err != nil {
 			return nil, err
+		}
+		// RDS is a claim-scoped shared device (like /dev/rsd0); inject it once.
+		if i == 0 {
+			edits.DeviceNodes = append(edits.DeviceNodes, rdsNodes...)
 		}
 		device := &PreparedDevice{
 			Device: drapbv1.Device{
