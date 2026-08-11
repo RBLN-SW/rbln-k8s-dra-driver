@@ -10,17 +10,19 @@ jobs:
   lint:
     runs-on: rbln-sw-k8s-general
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
       with:
         go-version-file: go.mod
         cache: false
     - name: update vendor
       run: go mod vendor
     - name: Lint
-      uses: golangci/golangci-lint-action@v9
+      uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
-        version: latest
+        # Pinned so a linter release cannot break CI on its own. Dependabot does
+        # not track `with:` values, so bump this by hand.
+        version: v2.12.2
         args: -v --timeout 5m
         skip-cache: true
