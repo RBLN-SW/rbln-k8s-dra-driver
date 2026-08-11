@@ -1,0 +1,73 @@
+# Scans an image that is already published. Images are scanned before they are
+# pushed (see image-build-push.yaml); this workflow is for rescanning what is
+# already in a registry, where new CVEs accumulate without the image changing.
+name: Image scan
+
+on:
+  workflow_call:
+    inputs:
+      image_ref:
+        type: string
+        description: Fully qualified image reference to scan
+        required: true
+      registry:
+        type: string
+        description: Registry to log in to before scanning (leave empty for anonymous pulls)
+        required: false
+        default: ''
+      block:
+        type: boolean
+        description: Fail the job when fixable Critical/High vulnerabilities are found
+        required: false
+        default: false
+      runner:
+        type: string
+        description: Runner label for the scan job
+        required: false
+        default: ubuntu-latest
+      sarif_category:
+        type: string
+        description: Code scanning category; must be unique per image scanned on the same commit
+        required: false
+        default: image
+      platform:
+        type: string
+        description: Platform to resolve a multi-arch index to, e.g. linux/arm64
+        required: false
+        default: ''
+    secrets:
+      registry_id:
+        description: Registry login ID
+        required: false
+      registry_password:
+        description: Registry login password
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+      security-events: write # upload-sarif
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Login to registry
+        if: inputs.registry != ''
+        shell: bash
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          REGISTRY_ID: ${{ secrets.registry_id }}
+          REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_ID" --password-stdin
+      - name: Scan image
+        uses: ./.github/actions/scan-image
+        with:
+          image-ref: ${{ inputs.image_ref }}
+          sarif-category: ${{ inputs.sarif_category }}
+          block: ${{ inputs.block }}
+          platform: ${{ inputs.platform }}

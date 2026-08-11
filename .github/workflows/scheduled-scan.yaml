@@ -1,0 +1,69 @@
+name: Scheduled image scan
+
+# Published images accumulate new CVEs without the image changing; rescan the
+# current release weekly so a failing run signals that a patch release is needed.
+on:
+  schedule:
+    - cron: '0 0 * * 1' # Mondays 00:00 UTC (09:00 KST)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    strategy:
+      fail-fast: false # one failing architecture must not hide the other
+      matrix:
+        # release.yaml builds exactly these two and points :latest at the newest
+        # release, so both are hardcoded rather than discovered at runtime.
+        # --platform is required: scanning a multi-arch index without one
+        # silently resolves to the runner's architecture.
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/image-scan.yaml
+    with:
+      image_ref: rebellions/k8s-dra-driver-npu:latest
+      platform: ${{ matrix.platform }}
+      registry: docker.io
+      block: true
+      sarif_category: released-${{ matrix.arch }}
+    secrets:
+      registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+  # A red cron run is easy to miss; track failures as an issue instead.
+  file-issue:
+    needs: scan
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update tracking issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Scheduled image scan failed"
+          # printf rather than a multi-line string: leading indentation would
+          # survive into the body, and four spaces is a markdown code block,
+          # which would leave the run link unclickable.
+          body=$(printf '%s\n\n%s\n' \
+            "Weekly Trivy scan of \`rebellions/k8s-dra-driver-npu:latest\` failed: fixable Critical/High CVEs, an end-of-life base image, or the scan itself errored. A patch release may be needed." \
+            "Run: ${RUN_URL}")
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing: ${RUN_URL}"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
