@@ -1,0 +1,81 @@
+name: Scan container image
+description: Report every Trivy finding to code scanning, then gate on fixable Critical/High CVEs.
+
+inputs:
+  image-ref:
+    description: Image to scan. May be a local daemon image or a registry reference.
+    required: true
+  sarif-category:
+    description: Code scanning category. Must be unique per image scanned on the same commit.
+    required: true
+  block:
+    description: Fail the step on fixable Critical/High vulnerabilities or an end-of-life base image.
+    required: false
+    default: 'false'
+  platform:
+    description: Platform to resolve a multi-arch index to, e.g. linux/arm64. Empty scans the default platform.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Trivy is driven directly rather than through aquasecurity/trivy-action.
+    # The two controls this gate leans on hardest, --platform and --exit-on-eol,
+    # have no trivy-action input, so they could only reach Trivy as TRIVY_* env
+    # vars set on a step that calls a nested composite action — undocumented
+    # runner behaviour whose failure mode is silent and open: no platform means
+    # the arm64 job rescans the amd64 image and files it under the arm64
+    # category, and no exit-on-eol means the EOL gate never fires. As flags they
+    # are load-bearing and visible. Driving Trivy directly also fetches the
+    # vulnerability DB once per job rather than once per trivy-action step.
+    # SHA-pinned: aquasecurity tags were force-pushed to a credential stealer in
+    # the 2026-03 supply-chain attack (GHSA-69fq-xp46-6x23).
+    - name: Install Trivy
+      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+      with:
+        # Pinned so a scanner release cannot change what the gate blocks on its
+        # own. Dependabot does not track `with:` values, so bump this by hand.
+        version: v0.70.0
+        cache: true
+
+    # Two passes: the first reports every severity to the Security tab so
+    # findings keep history and dedup even when the gate is off, the second is
+    # the pass/fail gate. Reporting runs before the gate so a blocked release
+    # still leaves its findings behind.
+    - name: Scan image (report, all severities)
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        args=(image)
+        if [ -n "$PLATFORM" ]; then args+=(--platform "$PLATFORM"); fi
+        trivy "${args[@]}" --format sarif --output trivy-results.sarif "$IMAGE_REF"
+    # v4 needs a runner new enough for node24; drop to v3.37.6
+    # (c4dd10e44af883a891fe31ced449bcb4a6728b9b) if a self-hosted runner is older.
+    - name: Upload results to code scanning
+      uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+      with:
+        sarif_file: trivy-results.sarif
+        category: ${{ inputs.sarif-category }}
+    - name: Gate on fixable Critical/High CVEs
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        PLATFORM: ${{ inputs.platform }}
+        # --ignore-unfixed means an end-of-life base image produces zero gate
+        # findings exactly when it is most dangerous: upstream stops issuing
+        # fixes, so every new CVE becomes unfixable and drops out of the gate.
+        # --exit-on-eol covers that, which is why both flags take this value;
+        # ubuntu:22.04 leaves standard support in 2027-04, and 0 disables both.
+        EXIT_CODE: ${{ inputs.block == 'true' && '1' || '0' }}
+      run: |
+        args=(image)
+        if [ -n "$PLATFORM" ]; then args+=(--platform "$PLATFORM"); fi
+        trivy "${args[@]}" \
+          --severity CRITICAL,HIGH \
+          --ignore-unfixed \
+          --exit-code "$EXIT_CODE" \
+          --exit-on-eol "$EXIT_CODE" \
+          "$IMAGE_REF"

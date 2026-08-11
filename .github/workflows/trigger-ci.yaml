@@ -21,11 +21,15 @@ jobs:
     secrets: inherit
   image-build-push:
     needs: [lint, manifests-check]
+    permissions:
+      contents: read
+      security-events: write
     uses: ./.github/workflows/image-build-push.yaml
     with:
       registry: harbor.k8s.rebellions.in
       image_repository: ${{ vars.IMAGE_REPOSITORY }}
       image_tag: ${{ github.sha }}
+      sarif_category: ci
     secrets:
       registry_id: ${{ secrets.HARBOR_USERNAME }}
       registry_password: ${{ secrets.HARBOR_PASSWORD }}

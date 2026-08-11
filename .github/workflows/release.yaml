@@ -10,23 +10,33 @@ permissions:
 
 jobs:
   build-amd64:
+    permissions:
+      contents: read
+      security-events: write
     uses: ./.github/workflows/image-build-push.yaml
     with:
       registry: docker.io
       image_repository: rebellions/k8s-dra-driver-npu
       image_tag: ${{ github.ref_name }}-amd64
       runner: ubuntu-latest
+      block: true
+      sarif_category: release-amd64
     secrets:
       registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
       registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
   build-arm64:
+    permissions:
+      contents: read
+      security-events: write
     uses: ./.github/workflows/image-build-push.yaml
     with:
       registry: docker.io
       image_repository: rebellions/k8s-dra-driver-npu
       image_tag: ${{ github.ref_name }}-arm64
       runner: ubuntu-22.04-rbln-arm
+      block: true
+      sarif_category: release-arm64
     secrets:
       registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
       registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}

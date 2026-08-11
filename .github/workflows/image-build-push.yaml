@@ -20,6 +20,16 @@ on:
         description: Runner label for the build job
         required: false
         default: sw-cloud-cluster-ci
+      block:
+        type: boolean
+        description: Fail without pushing when the built image has fixable Critical/High CVEs
+        required: false
+        default: false
+      sarif_category:
+        type: string
+        description: Code scanning category; must be unique per image scanned on the same commit
+        required: false
+        default: image
     secrets:
       registry_id:
         description: Registry login ID
@@ -31,6 +41,9 @@ on:
 jobs:
   image-build-push:
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+      security-events: write # upload-sarif
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install prerequisites
@@ -55,11 +68,31 @@ jobs:
           set -euo pipefail
           printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_ID" --password-stdin
 
-      - name: Build and push image
+      # Build, scan, then push. Scanning after the push would leave a vulnerable
+      # tag publicly pullable even when the gate fails, because the gate only
+      # blocks the manifest that promotes it to :vX.Y.Z and :latest — anyone
+      # referencing the per-arch tag directly would bypass it.
+      - name: Build image
         shell: bash
         run: |
           set -euo pipefail
-          make -f deployments/container/Makefile build push \
+          make -f deployments/container/Makefile build \
+            IMAGE_NAME="${{ inputs.image_repository }}" \
+            IMAGE_TAG="${{ inputs.image_tag }}" \
+            VERSION="${{ inputs.image_tag }}"
+
+      - name: Scan image
+        uses: ./.github/actions/scan-image
+        with:
+          image-ref: ${{ inputs.image_repository }}:${{ inputs.image_tag }}
+          sarif-category: ${{ inputs.sarif_category }}
+          block: ${{ inputs.block }}
+
+      - name: Push image
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -f deployments/container/Makefile push \
             IMAGE_NAME="${{ inputs.image_repository }}" \
             IMAGE_TAG="${{ inputs.image_tag }}" \
             VERSION="${{ inputs.image_tag }}"
