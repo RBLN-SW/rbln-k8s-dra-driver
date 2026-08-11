@@ -1,0 +1,54 @@
+version: 2
+
+# Workflows pin actions to commit SHAs, which trades one risk for another:
+# Dependabot only raises security alerts for actions referenced by semver, so
+# SHA-pinned actions get version-update PRs from this file and nothing else.
+# Without it the pins silently rot.
+#
+# cooldown delays every bump so a poisoned release ages out before it reaches us:
+# the 2026-03 trivy-action compromise (GHSA-69fq-xp46-6x23) was contained in
+# ~12 hours. It applies to version updates only, never to security updates.
+# Do not automerge action bumps — a SHA diff is small enough to read.
+#
+# There is deliberately no `docker` ecosystem entry, because it could not see
+# anything: both stages of deployments/container/Dockerfile use ARG-driven bases
+# (`FROM golang:${GOLANG_VERSION}` and `FROM ${BASE_IMAGE}`), and the real values
+# live in deployments/container/Makefile and common.mk, which Dependabot's
+# Dockerfile parser does not read. Base images are covered instead by:
+#   - `docker build --pull`, so every rebuild picks up the newest ubuntu:22.04
+#     patch level — the weekly scan failing is the signal to cut a patch release
+#   - `--exit-on-eol` in .github/actions/scan-image, which fails the release
+#     gate once a base image stops receiving fixes (ubuntu:22.04: 2027-04)
+# Distro and Go toolchain major bumps stay manual by necessity.
+updates:
+  - package-ecosystem: github-actions
+    # `directories`, not `directory`: for github-actions a bare `/` covers
+    # .github/workflows plus a root action.yml and nothing else, so the pins
+    # inside .github/actions/*/action.yaml — the most security-relevant ones
+    # here — would be updated by nobody.
+    # https://github.com/dependabot/dependabot-core/issues/7495
+    directories: ['/', '/.github/actions/*']
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+    labels: [dependencies, ci]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      semver-patch-days: 3
+      default-days: 7
+    groups:
+      kubernetes:
+        patterns: ['k8s.io/*', 'sigs.k8s.io/*']
+    labels: [dependencies]
+    open-pull-requests-limit: 5
