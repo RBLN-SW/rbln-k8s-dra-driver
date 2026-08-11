@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-GOLANG_VERSION ?= 1.25.7
+GOLANG_VERSION ?= 1.25.12
 
 MODULE := github.com/RBLN-SW/k8s-dra-driver-npu
 
