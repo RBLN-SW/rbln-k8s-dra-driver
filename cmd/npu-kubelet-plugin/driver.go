@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -68,11 +69,44 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
 
-	if err := helper.PublishResources(ctx, state.driverResources); err != nil {
+	if err := helper.PublishResources(ctx, state.DriverResources()); err != nil {
 		return nil, err
 	}
 
+	if interval := config.flags.vfioRescanInterval; interval > 0 {
+		go driver.runVfioRescan(ctx, interval)
+	}
+
 	return driver, nil
+}
+
+func (d *driver) runVfioRescan(ctx context.Context, interval time.Duration) {
+	logger := klog.FromContext(ctx)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		resources, changed, err := d.state.RescanVfioDevices()
+		if err != nil {
+			logger.Error(err, "Unable to rescan vfio-pci NPU devices")
+			continue
+		}
+		if !changed {
+			continue
+		}
+
+		logger.Info("vfio-pci NPU devices changed, republishing resources")
+		if err := d.helper.PublishResources(ctx, resources); err != nil {
+			logger.Error(err, "Unable to publish resources after vfio rescan")
+		}
+	}
 }
 
 func (d *driver) Shutdown(logger klog.Logger) error {

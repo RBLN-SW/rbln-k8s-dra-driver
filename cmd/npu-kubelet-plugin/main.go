@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -48,6 +49,7 @@ type Flags struct {
 	kubeletPluginsDirectoryPath   string
 	healthcheckPort               int
 	driverName                    string
+	vfioRescanInterval            time.Duration
 }
 
 type Config struct {
@@ -112,6 +114,13 @@ func newApp() *cli.App {
 			Usage:       "Name of the DRA driver.",
 			Destination: &flags.driverName,
 			EnvVars:     []string{"DRIVER_NAME"},
+		},
+		&cli.DurationFlag{
+			Name:        "vfio-rescan-interval",
+			Usage:       "Interval for rescanning NPU devices bound to vfio-pci for VM passthrough. Zero or negative disables periodic rescanning; devices are still scanned once at startup.",
+			Value:       30 * time.Second,
+			Destination: &flags.vfioRescanInterval,
+			EnvVars:     []string{"VFIO_RESCAN_INTERVAL"},
 		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)

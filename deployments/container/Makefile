@@ -16,6 +16,29 @@
 MKDIR ?= mkdir
 DISTRIBUTIONS := ubuntu22.04
 DOCKERFILE := $(CURDIR)/deployments/container/Dockerfile
+PUSH_ON_BUILD ?= false
+BUILD_MULTI_PLATFORM ?= false
+
+# PLATFORM selects a single target platform (e.g. linux/amd64, linux/arm64).
+# If unset, BUILD_MULTI_PLATFORM=true builds linux/amd64 + linux/arm64;
+# otherwise the build targets linux/amd64 (cluster NPU nodes are x86_64).
+PLATFORM ?=
+ifneq ($(PLATFORM),)
+PLATFORM_OPTION = --platform=$(PLATFORM)
+else ifeq ($(BUILD_MULTI_PLATFORM),true)
+PLATFORM_OPTION = --platform=linux/amd64,linux/arm64
+else
+PLATFORM_OPTION = --platform=linux/amd64
+endif
+
+ifeq ($(PUSH_ON_BUILD),true)
+OUTPUT_OPTION = --push
+else ifeq ($(BUILD_MULTI_PLATFORM),true)
+# Multi-platform images cannot be loaded into the classic docker image store.
+OUTPUT_OPTION = --output=type=image,push=false
+else
+OUTPUT_OPTION = --load
+endif
 
 include $(CURDIR)/common.mk
 
@@ -32,7 +55,9 @@ ubuntu22.04: BASE_IMAGE = docker.io/ubuntu:22.04
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
 	DOCKER_BUILDKIT=1 \
-		docker build --pull \
+		docker buildx build --pull \
+		$(OUTPUT_OPTION) \
+		$(PLATFORM_OPTION) \
 		--tag $(IMAGE) \
 		--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \

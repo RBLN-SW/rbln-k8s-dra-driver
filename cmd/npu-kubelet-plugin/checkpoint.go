@@ -13,13 +13,17 @@ type Checkpoint struct {
 
 type CheckpointV1 struct {
 	PreparedClaims PreparedClaims `json:"preparedClaims,omitempty"`
+	// KubeVirtMetadataDirs records, per claim UID, the KEP-5304 metadata
+	// directories published for vfio claims so Unprepare can remove them.
+	KubeVirtMetadataDirs map[string][]string `json:"kubevirtMetadataDirs,omitempty"`
 }
 
 func newCheckpoint() *Checkpoint {
 	pc := &Checkpoint{
 		Checksum: 0,
 		V1: &CheckpointV1{
-			PreparedClaims: make(PreparedClaims),
+			PreparedClaims:       make(PreparedClaims),
+			KubeVirtMetadataDirs: make(map[string][]string),
 		},
 	}
 	return pc

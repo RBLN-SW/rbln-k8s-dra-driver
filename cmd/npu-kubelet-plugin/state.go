@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -49,22 +50,43 @@ const (
 	pciBusIDAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pciBusID")
 	pcieRootAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pcieRoot")
 	numaNodeAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/numaNode")
+	deviceTypeAttributeKey = resourceapi.QualifiedName("type")
+	iommuGroupAttributeKey = resourceapi.QualifiedName("iommuGroup")
+
+	deviceTypeNpu  = "npu"
+	deviceTypeVfio = "vfio"
 )
 
 type DeviceState struct {
 	sync.Mutex
 	driverName        string
+	nodeName          string
 	cdi               *CDIHandler
 	driverResources   resourceslice.DriverResources
 	allocatable       AllocatableDevices
 	checkpointManager checkpointmanager.CheckpointManager
 	rsdGroupFn        func([]string) string
+
+	npuDevices          []resourceapi.Device
+	vfioDevices         []resourceapi.Device
+	sysfsPCIDevicesRoot string
 }
 
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
-	driverResources, allocatable, err := enumerateNpuDevices(ctx, config.flags.nodeName)
-	if err != nil {
-		return nil, fmt.Errorf("error enumerating all possible devices: %v", err)
+	logger := klog.FromContext(ctx)
+
+	npuDevices, npuErr := enumerateNpuDevices(ctx)
+	vfioDevices, vfioErr := enumerateVfioDevices(sysfsPCIDevicesRoot)
+	if vfioErr != nil {
+		logger.Error(vfioErr, "Unable to enumerate vfio-pci NPU devices")
+		vfioDevices = nil
+	}
+	if npuErr != nil {
+		if len(vfioDevices) == 0 {
+			return nil, fmt.Errorf("error enumerating all possible devices: %v", npuErr)
+		}
+		logger.Info("rbln-smi enumeration unavailable, continuing with vfio-pci devices only", "reason", npuErr)
+		npuDevices = nil
 	}
 
 	cdi, err := NewCDIHandler(config.flags.cdiRoot, config.flags.driverName, "npu")
@@ -74,7 +96,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	err = cdi.CreateCommonSpecFile()
 	if err != nil {
-		return nil, fmt.Errorf("unable to create CDI spec file for common edits: %v", err)
+		if len(npuDevices) > 0 {
+			return nil, fmt.Errorf("unable to create CDI spec file for common edits: %v", err)
+		}
+		logger.Info("Skipping common CDI spec file, RBLN runtime spec unavailable", "reason", err)
 	}
 
 	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
@@ -83,13 +108,16 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 
 	state := &DeviceState{
-		driverName:        config.flags.driverName,
-		cdi:               cdi,
-		driverResources:   driverResources,
-		allocatable:       allocatable,
-		checkpointManager: checkpointManager,
-		rsdGroupFn:        rsdgroup.RecreateRsdGroup,
+		driverName:          config.flags.driverName,
+		nodeName:            config.flags.nodeName,
+		cdi:                 cdi,
+		checkpointManager:   checkpointManager,
+		rsdGroupFn:          rsdgroup.RecreateRsdGroup,
+		npuDevices:          npuDevices,
+		vfioDevices:         vfioDevices,
+		sysfsPCIDevicesRoot: sysfsPCIDevicesRoot,
 	}
+	state.rebuildResources()
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
@@ -106,6 +134,55 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 
 	return state, nil
+}
+
+// Callers must hold the lock unless the state is not shared yet.
+func (s *DeviceState) rebuildResources() {
+	devices := slices.Concat(s.npuDevices, s.vfioDevices)
+
+	allocatable := make(AllocatableDevices, len(devices))
+	for _, d := range devices {
+		allocatable[d.Name] = d
+	}
+
+	s.allocatable = allocatable
+	s.driverResources = resourceslice.DriverResources{
+		Pools: map[string]resourceslice.Pool{
+			s.nodeName: {
+				Slices: []resourceslice.Slice{
+					{
+						Devices: devices,
+					},
+				},
+			},
+		},
+	}
+}
+
+func (s *DeviceState) DriverResources() resourceslice.DriverResources {
+	s.Lock()
+	defer s.Unlock()
+	return s.driverResources
+}
+
+func (s *DeviceState) RescanVfioDevices() (resourceslice.DriverResources, bool, error) {
+	vfioDevices, err := enumerateVfioDevices(s.sysfsPCIDevicesRoot)
+	if err != nil {
+		return resourceslice.DriverResources{}, false, err
+	}
+
+	s.Lock()
+	defer s.Unlock()
+
+	// The vfio devices carry no resource.Quantity values, so
+	// reflect.DeepEqual is a safe comparison here.
+	if reflect.DeepEqual(vfioDevices, s.vfioDevices) {
+		return s.driverResources, false, nil
+	}
+
+	s.vfioDevices = vfioDevices
+	s.rebuildResources()
+	return s.driverResources, true, nil
 }
 
 func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
@@ -134,12 +211,39 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
 	}
 
+	if s.claimHasVfioDevice(claim) {
+		dirs, err := writeKubeVirtMetadata(kubevirtMetadataBasePath, claim, s.driverName, s.allocatable)
+		if err != nil {
+			return nil, fmt.Errorf("unable to write KubeVirt device metadata: %v", err)
+		}
+		if checkpoint.V1.KubeVirtMetadataDirs == nil {
+			checkpoint.V1.KubeVirtMetadataDirs = make(map[string][]string)
+		}
+		checkpoint.V1.KubeVirtMetadataDirs[claimUID] = dirs
+	}
+
 	preparedClaims[claimUID] = preparedDevices
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
 	return preparedClaims[claimUID].GetDevices(), nil
+}
+
+// Callers must hold the lock.
+func (s *DeviceState) claimHasVfioDevice(claim *resourceapi.ResourceClaim) bool {
+	if claim.Status.Allocation == nil {
+		return false
+	}
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != s.driverName {
+			continue
+		}
+		if device, ok := s.allocatable[result.Device]; ok && isVfioDevice(device) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *DeviceState) Unprepare(claimUID string) error {
@@ -163,6 +267,13 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 	err := s.cdi.DeleteClaimSpecFile(claimUID)
 	if err != nil {
 		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
+	}
+
+	if dirs := checkpoint.V1.KubeVirtMetadataDirs[claimUID]; len(dirs) > 0 {
+		if err := removeKubeVirtMetadata(dirs); err != nil {
+			return fmt.Errorf("unable to remove KubeVirt device metadata: %v", err)
+		}
+		delete(checkpoint.V1.KubeVirtMetadataDirs, claimUID)
 	}
 
 	delete(preparedClaims, claimUID)
@@ -190,14 +301,23 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		results = append(results, result)
 	}
 
-	busIDs, err := s.getPCIBusIDs(results)
-	if err != nil {
-		return nil, err
+	// RSD groups only exist for devices driven by the rebellions kernel driver.
+	var npuBusIDs []string
+	for _, result := range results {
+		device := s.allocatable[result.Device]
+		if isVfioDevice(device) {
+			continue
+		}
+		busID, err := devicePCIBusID(device)
+		if err != nil {
+			return nil, err
+		}
+		npuBusIDs = append(npuBusIDs, busID)
 	}
 
 	hostRsdPath := ""
-	if len(busIDs) > 0 {
-		hostRsdPath = s.rsdGroupFn(busIDs)
+	if len(npuBusIDs) > 0 {
+		hostRsdPath = s.rsdGroupFn(npuBusIDs)
 	}
 
 	rdsNodes, err := s.cdi.getRDSDeviceNodes()
@@ -206,21 +326,34 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 
 	var preparedDevices PreparedDevices
-	for i, result := range results {
-		edits, err := s.applyConfig(result.Device, hostRsdPath)
+	rdsInjected := false
+	for _, result := range results {
+		var edits *cdispec.ContainerEdits
+		var err error
+
+		vfio := isVfioDevice(s.allocatable[result.Device])
+		if vfio {
+			edits, err = vfioContainerEdits(s.allocatable[result.Device])
+		} else {
+			edits, err = s.applyConfig(result.Device, hostRsdPath)
+		}
 		if err != nil {
 			return nil, err
 		}
-		// RDS is a claim-scoped shared device (like /dev/rsd0); inject it once.
-		if i == 0 {
+
+		// RDS is a claim-scoped shared device (like /dev/rsd0); inject it once,
+		// and only for devices driven by the rebellions kernel driver.
+		if !vfio && !rdsInjected {
 			edits.DeviceNodes = append(edits.DeviceNodes, rdsNodes...)
+			rdsInjected = true
 		}
+
 		device := &PreparedDevice{
 			Device: drapbv1.Device{
 				RequestNames: []string{result.Request},
 				PoolName:     result.Pool,
 				DeviceName:   result.Device,
-				CdiDeviceIds: s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device}),
+				CdiDeviceIds: s.cdi.GetClaimDevices(string(claim.UID), []string{result.Device}, !vfio),
 			},
 			ContainerEdits: &cdiapi.ContainerEdits{ContainerEdits: edits},
 		}
@@ -283,31 +416,25 @@ func (s *DeviceState) applyConfig(deviceName, hostRsdPath string) (*cdispec.Cont
 	return edits, nil
 }
 
-func (s *DeviceState) getPCIBusIDs(results []*resourceapi.DeviceRequestAllocationResult) ([]string, error) {
-	busIDs := make([]string, 0, len(results))
-	for _, result := range results {
-		device := s.allocatable[result.Device]
-		attr, ok := device.Attributes[pciBusIDAttributeKey]
-		if !ok || attr.StringValue == nil || *attr.StringValue == "" {
-			return nil, fmt.Errorf("allocatable device %q is missing attribute %s", result.Device, pciBusIDAttributeKey)
-		}
-		busIDs = append(busIDs, *attr.StringValue)
+func devicePCIBusID(device resourceapi.Device) (string, error) {
+	attr, ok := device.Attributes[pciBusIDAttributeKey]
+	if !ok || attr.StringValue == nil || *attr.StringValue == "" {
+		return "", fmt.Errorf("allocatable device %q is missing attribute %s", device.Name, pciBusIDAttributeKey)
 	}
-	return busIDs, nil
+	return *attr.StringValue, nil
 }
 
-func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.DriverResources, AllocatableDevices, error) {
+func enumerateNpuDevices(ctx context.Context) ([]resourceapi.Device, error) {
 	devs, err := device.GetDevices(ctx)
 	if err != nil {
-		return resourceslice.DriverResources{}, nil, err
+		return nil, err
 	}
 
-	allocatable := make(AllocatableDevices)
 	var devices []resourceapi.Device
 	for _, d := range devs {
 		attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-			"type": {
-				StringValue: ptr.To("npu"),
+			deviceTypeAttributeKey: {
+				StringValue: ptr.To(deviceTypeNpu),
 			},
 			"productName": {
 				StringValue: ptr.To(d.ProductName),
@@ -357,20 +484,7 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 			}
 		}
 		devices = append(devices, device)
-		allocatable[d.Name] = device
 	}
 
-	driverResources := resourceslice.DriverResources{
-		Pools: map[string]resourceslice.Pool{
-			nodeName: {
-				Slices: []resourceslice.Slice{
-					{
-						Devices: devices,
-					},
-				},
-			},
-		},
-	}
-
-	return driverResources, allocatable, nil
+	return devices, nil
 }

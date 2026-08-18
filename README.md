@@ -7,7 +7,9 @@ This repository implements a Kubernetes [Dynamic Resource Allocation (DRA)](http
 ### Prerequisites
 
 - Kubernetes v1.34 or later (not tested on older versions)
-- [RBLN NPU Operator](https://github.com/RBLN-SW/rbln-npu-operator) v0.2.1 or later (with containerToolkit enabled)
+- [RBLN NPU Operator](https://github.com/RBLN-SW/rbln-npu-operator) v0.2.1 or
+  later (VM passthrough requires an operator version with DRA vfio
+  passthrough support)
 - CDI must be enabled in the container runtime
 
 ### Install with Helm
@@ -17,6 +19,10 @@ helm repo add rebellions https://rbln-sw.github.io/charts/
 helm repo update
 helm install k8s-dra-driver-npu rebellions/k8s-dra-driver-npu
 ```
+
+The NPU operator can also deploy this driver itself
+(`draKubeletPlugin.enabled: true` in the `RBLNClusterPolicy`); in that case
+do not install this chart separately.
 
 ## Usage Examples
 
