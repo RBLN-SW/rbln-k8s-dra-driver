@@ -140,7 +140,7 @@ func TestEnumerateVfioDevices(t *testing.T) {
 	wantString := map[resourceapi.QualifiedName]string{
 		deviceTypeAttributeKey: deviceTypeVfio,
 		pciBusIDAttributeKey:   "0000:27:00.0",
-		pcieRootAttributeKey:   "0000:00:01.0",
+		pcieRootAttributeKey:   "pci0000:00",
 		"pciDeviceID":          "1251",
 		"productName":          "RBLN-CA25",
 	}
@@ -156,8 +156,9 @@ func TestEnumerateVfioDevices(t *testing.T) {
 	}
 
 	wantInt := map[resourceapi.QualifiedName]int64{
-		iommuGroupAttributeKey: 42,
-		numaNodeAttributeKey:   0,
+		iommuGroupAttributeKey:     42,
+		numaNodeAttributeKey:       0,
+		dranetNumaNodeAttributeKey: 0,
 	}
 	for key, want := range wantInt {
 		attr, ok := got.Attributes[key]

@@ -50,8 +50,12 @@ const (
 	pciBusIDAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pciBusID")
 	pcieRootAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/pcieRoot")
 	numaNodeAttributeKey   = resourceapi.QualifiedName("resource.kubernetes.io/numaNode")
-	deviceTypeAttributeKey = resourceapi.QualifiedName("type")
-	iommuGroupAttributeKey = resourceapi.QualifiedName("iommuGroup")
+	// dranetNumaNodeAttributeKey mirrors numaNodeAttributeKey under the key
+	// DraNet and dra-driver-cpu publish, so one claim can matchAttribute
+	// NPUs with NICs/CPUs across drivers.
+	dranetNumaNodeAttributeKey = resourceapi.QualifiedName("dra.net/numaNode")
+	deviceTypeAttributeKey     = resourceapi.QualifiedName("type")
+	iommuGroupAttributeKey     = resourceapi.QualifiedName("iommuGroup")
 
 	deviceTypeNpu  = "npu"
 	deviceTypeVfio = "vfio"
@@ -75,12 +79,21 @@ type DeviceState struct {
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	logger := klog.FromContext(ctx)
 
-	npuDevices, npuErr := enumerateNpuDevices(ctx)
+	npuDevices, npuErr := enumerateNpuDevices(ctx, sysfsPCIDevicesRoot)
 	vfioDevices, vfioErr := enumerateVfioDevices(sysfsPCIDevicesRoot)
 	if vfioErr != nil {
 		logger.Error(vfioErr, "Unable to enumerate vfio-pci NPU devices")
 		vfioDevices = nil
 	}
+	// Nodes are converted to vfio as a whole (vfio-manager binds --all), so
+	// "rbln-smi failed but vfio devices exist" can only mean a genuine
+	// vfio-only node and continuing without npu devices is correct. If
+	// per-card binding ever makes mixed nodes possible, this branch becomes
+	// unsafe: a transient rbln-smi failure (e.g. the plugin racing the
+	// driver container at boot) would permanently hide every container-mode
+	// NPU, because npu enumeration runs only once and the periodic rescan
+	// covers vfio devices only. Re-enumerate npu devices in the rescan loop
+	// before allowing mixed nodes.
 	if npuErr != nil {
 		if len(vfioDevices) == 0 {
 			return nil, fmt.Errorf("error enumerating all possible devices: %v", npuErr)
@@ -165,6 +178,10 @@ func (s *DeviceState) DriverResources() resourceslice.DriverResources {
 	return s.driverResources
 }
 
+// RescanVfioDevices refreshes only the vfio device list; npuDevices stay as
+// enumerated at startup. Converting a node to/from vfio-pci therefore relies
+// on the plugin being restarted (the current operational procedure) — without
+// a restart, a rebound device would be advertised as both npu and vfio.
 func (s *DeviceState) RescanVfioDevices() (resourceslice.DriverResources, bool, error) {
 	vfioDevices, err := enumerateVfioDevices(s.sysfsPCIDevicesRoot)
 	if err != nil {
@@ -207,23 +224,27 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 		return nil, fmt.Errorf("prepare failed: %v", err)
 	}
 
-	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
-		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
-	}
-
+	// Write the metadata before the CDI spec: the spec bind-mounts the
+	// metadata directories, so it must not reference paths that failed to
+	// materialize. Any later failure rolls the metadata back by claim UID
+	// (owner-marker scan) — metadata left behind by a failed Prepare would
+	// otherwise never be collected, because Unprepare no-ops for claims the
+	// checkpoint does not record.
 	if s.claimHasVfioDevice(claim) {
-		dirs, err := writeKubeVirtMetadata(kubevirtMetadataBasePath, claim, s.driverName, s.allocatable)
-		if err != nil {
+		if err := writeKubeVirtMetadata(kubevirtMetadataBasePath, claim, s.driverName, s.allocatable); err != nil {
+			_ = removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID)
 			return nil, fmt.Errorf("unable to write KubeVirt device metadata: %v", err)
 		}
-		if checkpoint.V1.KubeVirtMetadataDirs == nil {
-			checkpoint.V1.KubeVirtMetadataDirs = make(map[string][]string)
-		}
-		checkpoint.V1.KubeVirtMetadataDirs[claimUID] = dirs
+	}
+
+	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+		_ = removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID)
+		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
 	}
 
 	preparedClaims[claimUID] = preparedDevices
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
+		_ = removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID)
 		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
 	}
 
@@ -269,11 +290,8 @@ func (s *DeviceState) Unprepare(claimUID string) error {
 		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
 	}
 
-	if dirs := checkpoint.V1.KubeVirtMetadataDirs[claimUID]; len(dirs) > 0 {
-		if err := removeKubeVirtMetadata(dirs); err != nil {
-			return fmt.Errorf("unable to remove KubeVirt device metadata: %v", err)
-		}
-		delete(checkpoint.V1.KubeVirtMetadataDirs, claimUID)
+	if err := removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID); err != nil {
+		return fmt.Errorf("unable to remove KubeVirt device metadata: %v", err)
 	}
 
 	delete(preparedClaims, claimUID)
@@ -325,6 +343,8 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		klog.Warningf("reading RDS CDI spec failed for claim %s, continuing without RDS: %v", claim.UID, err)
 	}
 
+	metadataDirs := kubevirtMetadataClaimDirs(kubevirtMetadataBasePath, claim)
+
 	var preparedDevices PreparedDevices
 	rdsInjected := false
 	for _, result := range results {
@@ -333,7 +353,7 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 
 		vfio := isVfioDevice(s.allocatable[result.Device])
 		if vfio {
-			edits, err = vfioContainerEdits(s.allocatable[result.Device])
+			edits, err = vfioContainerEdits(s.allocatable[result.Device], metadataDirs)
 		} else {
 			edits, err = s.applyConfig(result.Device, hostRsdPath)
 		}
@@ -424,7 +444,7 @@ func devicePCIBusID(device resourceapi.Device) (string, error) {
 	return *attr.StringValue, nil
 }
 
-func enumerateNpuDevices(ctx context.Context) ([]resourceapi.Device, error) {
+func enumerateNpuDevices(ctx context.Context, sysfsRoot string) ([]resourceapi.Device, error) {
 	devs, err := device.GetDevices(ctx)
 	if err != nil {
 		return nil, err
@@ -451,9 +471,6 @@ func enumerateNpuDevices(ctx context.Context) ([]resourceapi.Device, error) {
 			pciBusIDAttributeKey: {
 				StringValue: ptr.To(d.PCIBusID),
 			},
-			pcieRootAttributeKey: {
-				StringValue: ptr.To(d.PCIERootID),
-			},
 			"pciLinkSpeed": {
 				StringValue: ptr.To(d.PCILinkSpeed),
 			},
@@ -468,9 +485,13 @@ func enumerateNpuDevices(ctx context.Context) ([]resourceapi.Device, error) {
 			},
 		}
 		if d.PCINumaNode != "" {
-			if v, err := strconv.ParseInt(d.PCINumaNode, 10, 64); err == nil {
+			if v, err := strconv.ParseInt(d.PCINumaNode, 10, 64); err == nil && v >= 0 {
 				attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
+				attrs[dranetNumaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
 			}
+		}
+		if pcieRoot, err := resolvePCIERootID(sysfsRoot, d.PCIBusID); err == nil && pcieRoot != "" {
+			attrs[pcieRootAttributeKey] = resourceapi.DeviceAttribute{StringValue: ptr.To(pcieRoot)}
 		}
 		device := resourceapi.Device{
 			Name:       d.Name,

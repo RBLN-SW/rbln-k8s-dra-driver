@@ -11,19 +11,20 @@ type Checkpoint struct {
 	V1       *CheckpointV1     `json:"v1,omitempty"`
 }
 
+// CheckpointV1 must keep exactly this field set: the checksum is computed
+// over the marshaled struct, so adding a field breaks checksum verification
+// for the version being rolled back to. KubeVirt metadata cleanup
+// deliberately does NOT live here — Unprepare discovers the directories to
+// remove by scanning the on-disk owner markers instead (kubevirt_metadata.go).
 type CheckpointV1 struct {
 	PreparedClaims PreparedClaims `json:"preparedClaims,omitempty"`
-	// KubeVirtMetadataDirs records, per claim UID, the KEP-5304 metadata
-	// directories published for vfio claims so Unprepare can remove them.
-	KubeVirtMetadataDirs map[string][]string `json:"kubevirtMetadataDirs,omitempty"`
 }
 
 func newCheckpoint() *Checkpoint {
 	pc := &Checkpoint{
 		Checksum: 0,
 		V1: &CheckpointV1{
-			PreparedClaims:       make(PreparedClaims),
-			KubeVirtMetadataDirs: make(map[string][]string),
+			PreparedClaims: make(PreparedClaims),
 		},
 	}
 	return pc

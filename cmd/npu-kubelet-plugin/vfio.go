@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -30,8 +29,6 @@ import (
 )
 
 const (
-	sysfsPCIDevicesRoot = "/sys/bus/pci/devices"
-
 	// Same selection criteria as the vfio-manager bind script in the NPU
 	// operator: Rebellions vendor with the processing-accelerator class.
 	rblnPCIVendorID = "0x1eff"
@@ -46,8 +43,6 @@ const (
 	qemuUID uint32 = 107
 	qemuGID uint32 = 107
 )
-
-var pciAddressRegexp = regexp.MustCompile(`^\d{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$`)
 
 var pciDeviceIDToProductName = map[string]string{
 	"1220": "RBLN-CA22",
@@ -114,6 +109,7 @@ func enumerateVfioDevices(root string) ([]resourceapi.Device, error) {
 		if numa, err := readSysfsValue(devPath, "numa_node"); err == nil {
 			if v, err := strconv.ParseInt(numa, 10, 64); err == nil && v >= 0 {
 				attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
+				attrs[dranetNumaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
 			}
 		}
 
@@ -133,22 +129,6 @@ func vfioDeviceName(busID string) string {
 	return "vfio-" + strings.ToLower(strings.NewReplacer(":", "-", ".", "-").Replace(busID))
 }
 
-func readSysfsValue(devPath, name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(devPath, name))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-func readSysfsLinkBase(devPath, name string) (string, error) {
-	target, err := os.Readlink(filepath.Join(devPath, name))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Base(target), nil
-}
-
 func deviceIOMMUGroupFromSysfs(devPath string) (int64, error) {
 	base, err := readSysfsLinkBase(devPath, "iommu_group")
 	if err != nil {
@@ -159,21 +139,6 @@ func deviceIOMMUGroupFromSysfs(devPath string) (int64, error) {
 		return 0, fmt.Errorf("unexpected iommu group %q for %s: %w", base, devPath, err)
 	}
 	return group, nil
-}
-
-// resolvePCIERootID resolves the PCI address of the PCIe root port a device
-// hangs off of by walking the physical device path in sysfs.
-func resolvePCIERootID(root, busID string) (string, error) {
-	resolvedPath, err := filepath.EvalSymlinks(filepath.Join(root, busID))
-	if err != nil {
-		return "", err
-	}
-	for segment := range strings.SplitSeq(filepath.Clean(resolvedPath), string(filepath.Separator)) {
-		if pciAddressRegexp.MatchString(segment) {
-			return segment, nil
-		}
-	}
-	return "", nil
 }
 
 func isVfioDevice(device resourceapi.Device) bool {
@@ -189,7 +154,7 @@ func deviceIOMMUGroup(device resourceapi.Device) (string, error) {
 	return strconv.FormatInt(*attr.IntValue, 10), nil
 }
 
-func vfioContainerEdits(device resourceapi.Device) (*cdispec.ContainerEdits, error) {
+func vfioContainerEdits(device resourceapi.Device, metadataDirs []string) (*cdispec.ContainerEdits, error) {
 	group, err := deviceIOMMUGroup(device)
 	if err != nil {
 		return nil, err
@@ -210,11 +175,18 @@ func vfioContainerEdits(device resourceapi.Device) (*cdispec.ContainerEdits, err
 	}
 	// virt-launcher resolves the passthrough PCI address from KEP-5304
 	// metadata files (see kubevirt_metadata.go). KubeVirt does not mount
-	// that directory itself, so expose it to the consuming container here.
-	edits.Mounts = append(edits.Mounts, &cdispec.Mount{
-		HostPath:      kubevirtMetadataBasePath,
-		ContainerPath: kubevirtMetadataBasePath,
-		Options:       []string{"ro", "bind"},
-	})
+	// those directories itself, so expose them to the consuming container
+	// here. Only this claim's directories are mounted — the base path holds
+	// every claim's metadata on the node, which must not leak across
+	// tenants. The container paths must mirror the host paths because
+	// KubeVirt assembles the full {base}/{subdir}/{claim}/{request} path
+	// when globbing.
+	for _, dir := range metadataDirs {
+		edits.Mounts = append(edits.Mounts, &cdispec.Mount{
+			HostPath:      dir,
+			ContainerPath: dir,
+			Options:       []string{"ro", "bind"},
+		})
+	}
 	return edits, nil
 }
