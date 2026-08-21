@@ -53,6 +53,8 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		return nil, nil
 	}
 
+	logger := logging.FromContext(ctx)
+
 	addr := net.JoinHostPort("", strconv.Itoa(port))
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -65,7 +67,6 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		// are enabled and the filename includes a uid.
 		Path: path.Join(config.flags.kubeletRegistrarDirectoryPath, config.flags.driverName+"-reg.sock"),
 	}).String()
-	slog.Info("Connecting to registration socket", "path", regSockPath)
 	regConn, err := grpc.NewClient(
 		regSockPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -78,7 +79,6 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		Scheme: "unix",
 		Path:   path.Join(config.DriverPluginPath(), "dra.sock"),
 	}).String()
-	slog.Info("Connecting to DRA socket", "path", draSockPath)
 	draConn, err := grpc.NewClient(
 		draSockPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -95,12 +95,19 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 	}
 	grpc_health_v1.RegisterHealthServer(server, healthcheck)
 
+	// One record for the whole service rather than one per dialled socket: the
+	// grpc.NewClient calls above are lazy, so their own records would only
+	// have restated configuration the operator already set.
+	logger.Info("Starting healthcheck service",
+		"addr", lis.Addr().String(), "registrationSocket", regSockPath, "draSocket", draSockPath)
+
 	healthcheck.wg.Add(1)
 	go func() {
 		defer healthcheck.wg.Done()
-		slog.Info("Starting healthcheck service", "addr", lis.Addr().String())
+		// Serve returns nil once GracefulStop runs, so this only fires on a
+		// real failure.
 		if err := server.Serve(lis); err != nil {
-			slog.Error("Failed to serve healthcheck service", "err", err, "addr", addr)
+			logger.Error("Failed to serve healthcheck service", "err", err, "addr", addr)
 		}
 	}()
 
@@ -109,7 +116,7 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 
 func (h *healthcheck) Stop() {
 	if h.server != nil {
-		slog.Info("Stopping healthcheck service")
+		slog.Debug("Stopping healthcheck service")
 		h.server.GracefulStop()
 	}
 	h.wg.Wait()
@@ -125,20 +132,23 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 	status := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING,
 	}
+	logger := logging.FromContext(ctx)
 
 	info, err := h.regClient.GetInfo(ctx, &registerapi.InfoRequest{})
 	if err != nil {
-		slog.Error("Failed to call GetInfo", "err", err)
+		// Error, not warn: three of these in a row is what makes kubelet
+		// restart the container, so it is the record an operator alerts on.
+		logger.Error("Healthcheck failed calling GetInfo", "err", err)
 		return status, nil
 	}
-	slog.Log(ctx, logging.LevelTrace, "Successfully invoked GetInfo", "info", info)
+	logger.Log(ctx, logging.LevelTrace, "Successfully invoked GetInfo", "info", info)
 
 	_, err = h.draClient.NodePrepareResources(ctx, &drapb.NodePrepareResourcesRequest{})
 	if err != nil {
-		slog.Error("Failed to call NodePrepareResources", "err", err)
+		logger.Error("Healthcheck failed calling NodePrepareResources", "err", err)
 		return status, nil
 	}
-	slog.Log(ctx, logging.LevelTrace, "Successfully invoked NodePrepareResources")
+	logger.Log(ctx, logging.LevelTrace, "Successfully invoked NodePrepareResources")
 
 	status.Status = grpc_health_v1.HealthCheckResponse_SERVING
 	return status, nil

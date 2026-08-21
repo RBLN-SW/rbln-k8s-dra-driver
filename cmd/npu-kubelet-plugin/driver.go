@@ -68,12 +68,19 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
 
-	// Logged before the call so a publish failure is not silent.
-	logging.FromContext(ctx).Info("Publishing node devices",
-		"deviceCount", len(state.allocatable), "pool", config.flags.nodeName)
 	if err := helper.PublishResources(ctx, state.driverResources); err != nil {
 		return nil, err
 	}
+
+	// The last startup record, and the one that says the plugin is serving:
+	// enumeration, kubelet registration, the healthcheck and the publish
+	// request all succeeded. PublishResources does not block and the apiserver
+	// rejects invalid slices asynchronously, so this claims the driver is up,
+	// not that the ResourceSlice exists yet — a rejected write arrives later
+	// through HandleError.
+	logging.FromContext(ctx).Info("Driver started",
+		"driverName", config.flags.driverName, "pool", config.flags.nodeName,
+		"deviceCount", len(state.allocatable))
 
 	return driver, nil
 }
@@ -87,7 +94,13 @@ func (d *driver) Shutdown() error {
 }
 
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
-	logging.FromContext(ctx).Info("Received request to prepare resource claims", "count", len(claims))
+	// The liveness probe drives this RPC with an empty claim list once per
+	// probe period (health.go), and the helper forwards it here unconditionally.
+	// Logging those at info would drown real kubelet traffic in records that
+	// look exactly like it.
+	if len(claims) > 0 {
+		logging.FromContext(ctx).Info("Received request to prepare resource claims", "count", len(claims))
+	}
 	result := make(map[types.UID]kubeletplugin.PrepareResult)
 
 	for _, claim := range claims {
@@ -134,7 +147,10 @@ func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.Re
 }
 
 func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
-	logging.FromContext(ctx).Info("Received request to unprepare resource claims", "count", len(claims))
+	// Guarded for the same reason as prepare, so the two stay symmetric.
+	if len(claims) > 0 {
+		logging.FromContext(ctx).Info("Received request to unprepare resource claims", "count", len(claims))
+	}
 	result := make(map[types.UID]error)
 
 	for _, claim := range claims {

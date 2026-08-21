@@ -166,6 +166,11 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimUID string) error {
 		return nil
 	}
 
+	// Captured before the delete below, so the record can name what was torn
+	// down. Prepare logs the device names it injected; without the same names
+	// here an operator cannot reconcile the two halves of a claim's lifecycle.
+	deviceNames := preparedClaims[claimUID].GetDeviceNames()
+
 	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
 		return fmt.Errorf("unprepare failed: %w", err)
 	}
@@ -180,7 +185,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimUID string) error {
 		return fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
-	logger.Info("Unprepared devices for claim")
+	logger.Info("Unprepared devices for claim", "devices", deviceNames)
 	return nil
 }
 
@@ -215,9 +220,12 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			// applyConfig skips the shared node when the path is empty, so the
 			// container starts with only its own NPUs, the pod goes Ready, and
 			// peer communication is broken with nothing else to show for it.
-			// This record is the only signal that the pod is quietly degraded.
-			logger.Error("RSD group creation returned no device path; containers for this claim will have no /dev/rsd0 and multi-NPU peer communication will not work",
-				"busIDs", busIDs)
+			// This record is the only signal that the pod is quietly degraded;
+			// "impact" states that in the record because the message alone
+			// reads like a transient failure the caller retried.
+			logger.Error("RSD group creation returned no device path",
+				"busIDs", busIDs,
+				"impact", "containers get no /dev/rsd0; multi-NPU peer communication disabled")
 		} else {
 			logger.Info("Created RSD group device", "hostRsdPath", hostRsdPath, "busIDs", busIDs)
 		}
@@ -334,8 +342,9 @@ func setNumaNodeAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]re
 	}
 	v, err := strconv.ParseInt(numaNode, 10, 64)
 	if err != nil {
-		logging.FromContext(ctx).Warn("Ignoring unparseable NUMA node; this device will be published without a numaNode attribute",
-			"device", deviceName, "numaNode", numaNode, "err", err)
+		logging.FromContext(ctx).Warn("Ignoring unparseable NUMA node",
+			"device", deviceName, "numaNode", numaNode, "err", err,
+			"impact", "device published without a numaNode attribute")
 		return
 	}
 	attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
@@ -351,7 +360,8 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 	if len(devs) == 0 {
 		// The DaemonSet only lands on nodes labelled as having NPUs, so zero
 		// devices means the label, the kernel driver and reality disagree.
-		logger.Warn("No NPU devices found on this node; the published ResourceSlice will be empty")
+		logger.Warn("No NPU devices found on this node",
+			"impact", "the published ResourceSlice will be empty and no pod can be scheduled here")
 	}
 
 	allocatable := make(AllocatableDevices)
