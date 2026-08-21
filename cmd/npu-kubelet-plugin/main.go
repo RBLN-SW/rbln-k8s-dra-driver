@@ -19,7 +19,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,18 +31,22 @@ import (
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/flags"
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
-	"k8s.io/klog/v2"
 )
 
 const (
 	DriverPluginCheckpointFile = "checkpoint.json"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=...". It is
+// reported in the startup record because "which build is running" is the first
+// thing an operator needs when correlating a bug report with a log stream.
+var version = "devel"
+
 type Flags struct {
 	kubeClientConfig flags.KubeClientConfig
-	loggingConfig    *flags.LoggingConfig
 
 	nodeName                      string
 	cdiRoot                       string
@@ -61,16 +67,27 @@ func (c Config) DriverPluginPath() string {
 }
 
 func main() {
+	// The contract logger comes first so everything below emits through it.
+	level, format := logging.SetupFromEnv()
+	// Route klog (kubeletplugin helper, client-go, utilruntime) through slog and
+	// raise klog's own V(n) gate to match; also enables contextual logging so
+	// ctx-derived loggers share the handler.
+	logging.BridgeKlog(level)
+	// glog (rblnlib-go rsdgroup/rblnsmi) defaults to files under /tmp; send it
+	// to stderr so RSD-group failures reach the container log stream. Ignore
+	// the error defensively in case a future rblnlib-go drops glog.
+	_ = flag.Set("logtostderr", "true")
+
+	slog.Info("Starting npu-kubelet-plugin",
+		"version", version, "logLevel", level, "logFormat", format)
 	if err := newApp().Run(os.Args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		slog.Error("Command failed", "err", err)
 		os.Exit(1)
 	}
 }
 
 func newApp() *cli.App {
-	flags := &Flags{
-		loggingConfig: flags.NewLoggingConfig(),
-	}
+	flags := &Flags{}
 	cliFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:        "node-name",
@@ -115,7 +132,6 @@ func newApp() *cli.App {
 		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
-	cliFlags = append(cliFlags, flags.loggingConfig.Flags()...)
 
 	app := &cli.App{
 		Name:            "npu-kubelet-plugin",
@@ -127,7 +143,7 @@ func newApp() *cli.App {
 			if c.Args().Len() > 0 {
 				return fmt.Errorf("arguments not supported: %v", c.Args().Slice())
 			}
-			return flags.loggingConfig.Apply()
+			return nil
 		},
 		Action: func(c *cli.Context) error {
 			ctx := c.Context
@@ -153,8 +169,6 @@ func newApp() *cli.App {
 }
 
 func RunPlugin(ctx context.Context, config *Config) error {
-	logger := klog.FromContext(ctx)
-
 	err := os.MkdirAll(config.DriverPluginPath(), 0750)
 	if err != nil {
 		return err
@@ -170,7 +184,7 @@ func RunPlugin(ctx context.Context, config *Config) error {
 	case err != nil:
 		return err
 	case !info.IsDir():
-		return fmt.Errorf("path for cdi file generation is not a directory: '%v'", err)
+		return fmt.Errorf("path for CDI file generation is not a directory: %q", config.flags.cdiRoot)
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -186,12 +200,17 @@ func RunPlugin(ctx context.Context, config *Config) error {
 	<-ctx.Done()
 	stop()
 	if err := context.Cause(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Error(err, "error from context")
+		// The error itself was already logged once by HandleError via
+		// utilruntime; record only the shutdown reason here. Warn, not info:
+		// this is the branch operators alert on.
+		slog.Warn("Shutting down after fatal background error", "err", err)
+	} else {
+		slog.Info("Shutting down on signal")
 	}
 
-	err = driver.Shutdown(logger)
+	err = driver.Shutdown()
 	if err != nil {
-		logger.Error(err, "Unable to cleanly shutdown driver")
+		slog.Error("Failed to shut down driver cleanly", "err", err)
 	}
 
 	return nil

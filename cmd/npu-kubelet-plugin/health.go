@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"path"
@@ -30,9 +31,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog/v2"
 	drapb "k8s.io/kubelet/pkg/apis/dra/v1"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
+
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 )
 
 type healthcheck struct {
@@ -46,12 +48,12 @@ type healthcheck struct {
 }
 
 func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error) {
-	log := klog.FromContext(ctx)
-
 	port := config.flags.healthcheckPort
 	if port < 0 {
 		return nil, nil
 	}
+
+	logger := logging.FromContext(ctx)
 
 	addr := net.JoinHostPort("", strconv.Itoa(port))
 	lis, err := net.Listen("tcp", addr)
@@ -65,7 +67,6 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		// are enabled and the filename includes a uid.
 		Path: path.Join(config.flags.kubeletRegistrarDirectoryPath, config.flags.driverName+"-reg.sock"),
 	}).String()
-	log.Info("connecting to registration socket", "path", regSockPath)
 	regConn, err := grpc.NewClient(
 		regSockPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -78,7 +79,6 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		Scheme: "unix",
 		Path:   path.Join(config.DriverPluginPath(), "dra.sock"),
 	}).String()
-	log.Info("connecting to DRA socket", "path", draSockPath)
 	draConn, err := grpc.NewClient(
 		draSockPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -95,21 +95,28 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 	}
 	grpc_health_v1.RegisterHealthServer(server, healthcheck)
 
+	// One record for the whole service rather than one per dialled socket: the
+	// grpc.NewClient calls above are lazy, so their own records would only
+	// have restated configuration the operator already set.
+	logger.Info("Starting healthcheck service",
+		"addr", lis.Addr().String(), "registrationSocket", regSockPath, "draSocket", draSockPath)
+
 	healthcheck.wg.Add(1)
 	go func() {
 		defer healthcheck.wg.Done()
-		log.Info("starting healthcheck service", "addr", lis.Addr().String())
+		// Serve returns nil once GracefulStop runs, so this only fires on a
+		// real failure.
 		if err := server.Serve(lis); err != nil {
-			log.Error(err, "failed to serve healthcheck service", "addr", addr)
+			logger.Error("Failed to serve healthcheck service", "err", err, "addr", addr)
 		}
 	}()
 
 	return healthcheck, nil
 }
 
-func (h *healthcheck) Stop(logger klog.Logger) {
+func (h *healthcheck) Stop() {
 	if h.server != nil {
-		logger.Info("stopping healthcheck service")
+		slog.Debug("Stopping healthcheck service")
 		h.server.GracefulStop()
 	}
 	h.wg.Wait()
@@ -117,8 +124,6 @@ func (h *healthcheck) Stop(logger klog.Logger) {
 
 // Check implements [grpc_health_v1.HealthServer].
 func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
-	log := klog.FromContext(ctx)
-
 	knownServices := map[string]struct{}{"": {}, "liveness": {}}
 	if _, known := knownServices[req.GetService()]; !known {
 		return nil, status.Error(codes.NotFound, "unknown service")
@@ -127,20 +132,23 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 	status := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING,
 	}
+	logger := logging.FromContext(ctx)
 
 	info, err := h.regClient.GetInfo(ctx, &registerapi.InfoRequest{})
 	if err != nil {
-		log.Error(err, "failed to call GetInfo")
+		// Error, not warn: three of these in a row is what makes kubelet
+		// restart the container, so it is the record an operator alerts on.
+		logger.Error("Healthcheck failed calling GetInfo", "err", err)
 		return status, nil
 	}
-	log.V(5).Info("Successfully invoked GetInfo", "info", info)
+	logger.Log(ctx, logging.LevelTrace, "Successfully invoked GetInfo", "info", info)
 
 	_, err = h.draClient.NodePrepareResources(ctx, &drapb.NodePrepareResourcesRequest{})
 	if err != nil {
-		log.Error(err, "failed to call NodePrepareResources")
+		logger.Error("Healthcheck failed calling NodePrepareResources", "err", err)
 		return status, nil
 	}
-	log.V(5).Info("Successfully invoked NodePrepareResources")
+	logger.Log(ctx, logging.LevelTrace, "Successfully invoked NodePrepareResources")
 
 	status.Status = grpc_health_v1.HealthCheckResponse_SERVING
 	return status, nil

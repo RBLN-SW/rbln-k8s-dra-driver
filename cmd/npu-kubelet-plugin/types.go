@@ -19,3 +19,11 @@ func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
 	}
 	return devices
 }
+
+func (pds PreparedDevices) GetDeviceNames() []string {
+	names := make([]string, 0, len(pds))
+	for _, pd := range pds {
+		names = append(names, pd.GetDeviceName())
+	}
+	return names
+}
