@@ -79,6 +79,10 @@ spec:
         - name: HEALTHCHECK_PORT
           value: {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | quote }}
         {{- end }}
+        - name: RBLN_DRA_DRIVER_LOG_LEVEL
+          value: {{ .Values.logging.level | quote }}
+        - name: RBLN_DRA_DRIVER_LOG_FORMAT
+          value: {{ .Values.logging.format | quote }}
         volumeMounts:
         - name: plugins-registry
           mountPath: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}

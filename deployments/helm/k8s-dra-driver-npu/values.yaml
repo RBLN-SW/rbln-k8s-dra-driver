@@ -25,6 +25,12 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name: ""
 
+logging:
+  # error|warning|info|debug|trace — debug adds caller; trace adds gRPC payload dumps
+  level: info
+  # json|text — production default is structured JSON on stdout
+  format: json
+
 kubeletPlugin:
   priorityClassName: "system-node-critical"
   updateStrategy:
