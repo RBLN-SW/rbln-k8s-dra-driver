@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -105,9 +106,16 @@ func newApp(logLevel, logFormat string) *cli.App {
 			server := &http.Server{
 				Handler: mux,
 				Addr:    fmt.Sprintf(":%d", flags.port),
+				// net/http logs TLS handshake failures and handler panics
+				// through this logger. Left unset it is the stdlib default,
+				// which writes unstructured text to stderr — so the records
+				// that matter most on a webhook (a cert the apiserver will not
+				// accept) would be the only ones outside the contract.
+				ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 			}
 			slog.Info("Starting webhook server",
-				"addr", server.Addr, "driverName", flags.driverName, "logLevel", logLevel, "logFormat", logFormat)
+				"addr", server.Addr, "driverName", flags.driverName,
+				"logLevel", logLevel, "logFormat", logFormat)
 			return server.ListenAndServeTLS(flags.certFile, flags.keyFile)
 		},
 	}
@@ -136,12 +144,15 @@ func serveResourceClaim(driverName string) func(http.ResponseWriter, *http.Reque
 	}
 }
 
-func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.AdmissionReview) *admissionv1.AdmissionResponse) {
+func serve(w http.ResponseWriter, r *http.Request, admit func(context.Context, admissionv1.AdmissionReview) *admissionv1.AdmissionResponse) {
+	ctx := r.Context()
+	logger := logging.FromContext(ctx)
+
 	var body []byte
 	if r.Body != nil {
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
-			slog.Error("Failed to read request body", "err", err)
+			logger.Error("Failed to read request body", "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -152,39 +163,45 @@ func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.Admiss
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
 		msg := fmt.Sprintf("contentType=%s, expected application/json", contentType)
-		slog.Warn("Rejected request with unexpected content type", "contentType", contentType)
+		logger.Warn("Rejected request with unexpected content type", "contentType", contentType)
 		http.Error(w, msg, http.StatusUnsupportedMediaType)
 		return
 	}
 
 	// The raw body carries arbitrary user object contents, so it stays behind
 	// the trace gate; debug is documented as production-usable.
-	slog.Log(r.Context(), logging.LevelTrace, "Handling admission request", "body", string(body))
+	logger.Log(ctx, logging.LevelTrace, "Handling admission request", "body", string(body))
 
 	requestedAdmissionReview, err := readAdmissionReview(body)
 	if err != nil {
 		msg := fmt.Sprintf("failed to read AdmissionReview from request body: %v", err)
-		slog.Warn("Failed to read AdmissionReview from request body", "err", err)
+		logger.Warn("Failed to read AdmissionReview from request body", "err", err)
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+
+	// Every record below inherits these, so the rejection warns do not each
+	// have to restate them and nothing on this path is left unattributable.
+	req := requestedAdmissionReview.Request
+	ctx = logging.WithValues(ctx, "requestUID", string(req.UID),
+		"resource", req.Resource.String(), "namespace", req.Namespace, "name", req.Name)
+	logger = logging.FromContext(ctx)
+
 	responseAdmissionReview := &admissionv1.AdmissionReview{}
 	responseAdmissionReview.SetGroupVersionKind(requestedAdmissionReview.GroupVersionKind())
-	responseAdmissionReview.Response = admit(*requestedAdmissionReview)
-	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
+	responseAdmissionReview.Response = admit(ctx, *requestedAdmissionReview)
+	responseAdmissionReview.Response.UID = req.UID
 
-	slog.Debug("Sending admission response",
-		"requestUID", string(requestedAdmissionReview.Request.UID),
-		"allowed", responseAdmissionReview.Response.Allowed)
+	logger.Debug("Sending admission response", "allowed", responseAdmissionReview.Response.Allowed)
 	respBytes, err := json.Marshal(responseAdmissionReview)
 	if err != nil {
-		slog.Error("Failed to marshal admission response", "err", err)
+		logger.Error("Failed to marshal admission response", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(respBytes); err != nil {
-		slog.Error("Failed to write admission response", "err", err)
+		logger.Error("Failed to write admission response", "err", err)
 	}
 }
 
@@ -203,20 +220,25 @@ func readAdmissionReview(data []byte) (*admissionv1.AdmissionReview, error) {
 	if !ok {
 		return nil, fmt.Errorf("expected v1.AdmissionReview but got: %T", obj)
 	}
+	// A review without a request decodes cleanly, and every caller dereferences
+	// Request. Rejecting it here turns a handler panic — which net/http reports
+	// as an unstructured stack trace and a bare 500 — into a warn and a 400.
+	if requestedAdmissionReview.Request == nil {
+		return nil, fmt.Errorf("AdmissionReview carries no request")
+	}
 
 	return requestedAdmissionReview, nil
 }
 
-func admitResourceClaimParameters(_ string) func(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-	return func(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-		slog.Debug("Admitting resource claim parameters")
+func admitResourceClaimParameters(_ string) func(ctx context.Context, ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+	return func(ctx context.Context, ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+		logger := logging.FromContext(ctx)
 
 		switch ar.Request.Resource {
 		case resourceClaimResourceV1, resourceClaimResourceV1Beta1, resourceClaimResourceV1Beta2:
 			_, extractErr := extractResourceClaim(ar)
 			if extractErr != nil {
-				slog.Warn("Rejected resource claim parameters", "err", extractErr,
-					"requestUID", string(ar.Request.UID), "namespace", ar.Request.Namespace, "name", ar.Request.Name)
+				logger.Warn("Rejected resource claim parameters", "err", extractErr)
 				return &admissionv1.AdmissionResponse{
 					Result: &metav1.Status{
 						Message: extractErr.Error(),
@@ -227,8 +249,7 @@ func admitResourceClaimParameters(_ string) func(ar admissionv1.AdmissionReview)
 		case resourceClaimTemplateResourceV1, resourceClaimTemplateResourceV1Beta1, resourceClaimTemplateResourceV1Beta2:
 			_, extractErr := extractResourceClaimTemplate(ar)
 			if extractErr != nil {
-				slog.Warn("Rejected resource claim template parameters", "err", extractErr,
-					"requestUID", string(ar.Request.UID), "namespace", ar.Request.Namespace, "name", ar.Request.Name)
+				logger.Warn("Rejected resource claim template parameters", "err", extractErr)
 				return &admissionv1.AdmissionResponse{
 					Result: &metav1.Status{
 						Message: extractErr.Error(),
@@ -245,8 +266,7 @@ func admitResourceClaimParameters(_ string) func(ar admissionv1.AdmissionReview)
 				},
 				ar.Request.Resource,
 			)
-			slog.Warn("Rejected request for unexpected resource",
-				"resource", ar.Request.Resource.String(), "requestUID", string(ar.Request.UID))
+			logger.Warn("Rejected request for unexpected resource")
 			return &admissionv1.AdmissionResponse{
 				Result: &metav1.Status{
 					Message: msg,
