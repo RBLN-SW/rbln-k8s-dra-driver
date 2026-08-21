@@ -41,6 +41,9 @@ type Flags struct {
 	driverName string
 }
 
+// version is stamped at build time with -ldflags "-X main.version=...".
+var version = "devel"
+
 func main() {
 	// The contract logger comes first so everything below emits through it.
 	level, format := logging.SetupFromEnv()
@@ -114,7 +117,7 @@ func newApp(logLevel, logFormat string) *cli.App {
 				ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 			}
 			slog.Info("Starting webhook server",
-				"addr", server.Addr, "driverName", flags.driverName,
+				"version", version, "addr", server.Addr, "driverName", flags.driverName,
 				"logLevel", logLevel, "logFormat", logFormat)
 			return server.ListenAndServeTLS(flags.certFile, flags.keyFile)
 		},

@@ -40,6 +40,11 @@ const (
 	DriverPluginCheckpointFile = "checkpoint.json"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=...". It is
+// reported in the startup record because "which build is running" is the first
+// thing an operator needs when correlating a bug report with a log stream.
+var version = "devel"
+
 type Flags struct {
 	kubeClientConfig flags.KubeClientConfig
 
@@ -73,7 +78,8 @@ func main() {
 	// the error defensively in case a future rblnlib-go drops glog.
 	_ = flag.Set("logtostderr", "true")
 
-	slog.Info("Starting npu-kubelet-plugin", "logLevel", level, "logFormat", format)
+	slog.Info("Starting npu-kubelet-plugin",
+		"version", version, "logLevel", level, "logFormat", format)
 	if err := newApp().Run(os.Args); err != nil {
 		slog.Error("Command failed", "err", err)
 		os.Exit(1)

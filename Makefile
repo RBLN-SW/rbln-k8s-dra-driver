@@ -32,9 +32,13 @@ ifneq ($(PREFIX),)
 cmd-%: COMMAND_BUILD_OPTIONS = -o $(PREFIX)/$(*)
 endif
 cmds: $(CMD_TARGETS)
+# Only stamp main.version when VERSION is set, so an unset VERSION leaves the
+# binary's own "devel" default instead of overwriting it with an empty string.
+LDFLAGS := -s -w $(if $(VERSION),-X main.version=$(VERSION))
+
 $(CMD_TARGETS): cmd-%:
 	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' GOOS=$(GOOS) \
-		go build -ldflags "-s -w -X main.version=$(VERSION)" $(COMMAND_BUILD_OPTIONS) $(MODULE)/cmd/$(*)
+		go build -ldflags "$(LDFLAGS)" $(COMMAND_BUILD_OPTIONS) $(MODULE)/cmd/$(*)
 
 build:
 	GOOS=$(GOOS) go build ./...
