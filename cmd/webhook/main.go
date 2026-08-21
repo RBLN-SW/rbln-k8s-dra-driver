@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -27,15 +28,12 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/flags"
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 )
 
 type Flags struct {
-	loggingConfig *flags.LoggingConfig
-
 	certFile   string
 	keyFile    string
 	port       int
@@ -43,16 +41,19 @@ type Flags struct {
 }
 
 func main() {
-	if err := newApp().Run(os.Args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	// The contract logger comes first so everything below emits through it.
+	level, format := logging.SetupFromEnv()
+	// Route klog (apimachinery, client-go) through slog, V(n) gate included.
+	logging.BridgeKlog(level)
+
+	if err := newApp(level, format).Run(os.Args); err != nil {
+		slog.Error("Command failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func newApp() *cli.App {
-	flags := &Flags{
-		loggingConfig: flags.NewLoggingConfig(),
-	}
+func newApp(logLevel, logFormat string) *cli.App {
+	flags := &Flags{}
 	cliFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:        "tls-cert-file",
@@ -79,8 +80,6 @@ func newApp() *cli.App {
 			EnvVars:     []string{"DRIVER_NAME"},
 		},
 	}
-	cliFlags = append(cliFlags, flags.loggingConfig.Flags()...)
-
 	app := &cli.App{
 		Name:            "webhook",
 		Usage:           "webhook implements a validating admission webhook complementing a DRA driver plugin.",
@@ -91,7 +90,7 @@ func newApp() *cli.App {
 			if c.Args().Len() > 0 {
 				return fmt.Errorf("arguments not supported: %v", c.Args().Slice())
 			}
-			return flags.loggingConfig.Apply()
+			return nil
 		},
 		Action: func(c *cli.Context) error {
 			if flags.driverName == "" {
@@ -107,7 +106,8 @@ func newApp() *cli.App {
 				Handler: mux,
 				Addr:    fmt.Sprintf(":%d", flags.port),
 			}
-			klog.Info("starting webhook server on", server.Addr)
+			slog.Info("Starting webhook server",
+				"addr", server.Addr, "driverName", flags.driverName, "logLevel", logLevel, "logFormat", logFormat)
 			return server.ListenAndServeTLS(flags.certFile, flags.keyFile)
 		},
 	}
@@ -141,7 +141,7 @@ func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.Admiss
 	if r.Body != nil {
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
-			klog.Error(err)
+			slog.Error("Failed to read request body", "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -152,17 +152,19 @@ func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.Admiss
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
 		msg := fmt.Sprintf("contentType=%s, expected application/json", contentType)
-		klog.Error(msg)
+		slog.Warn("Rejected request with unexpected content type", "contentType", contentType)
 		http.Error(w, msg, http.StatusUnsupportedMediaType)
 		return
 	}
 
-	klog.V(2).Infof("handling request: %s", body)
+	// The raw body carries arbitrary user object contents, so it stays behind
+	// the trace gate; debug is documented as production-usable.
+	slog.Log(r.Context(), logging.LevelTrace, "Handling admission request", "body", string(body))
 
 	requestedAdmissionReview, err := readAdmissionReview(body)
 	if err != nil {
 		msg := fmt.Sprintf("failed to read AdmissionReview from request body: %v", err)
-		klog.Error(msg)
+		slog.Warn("Failed to read AdmissionReview from request body", "err", err)
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
@@ -171,16 +173,18 @@ func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.Admiss
 	responseAdmissionReview.Response = admit(*requestedAdmissionReview)
 	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
 
-	klog.V(2).Infof("sending response: %v", responseAdmissionReview)
+	slog.Debug("Sending admission response",
+		"requestUID", string(requestedAdmissionReview.Request.UID),
+		"allowed", responseAdmissionReview.Response.Allowed)
 	respBytes, err := json.Marshal(responseAdmissionReview)
 	if err != nil {
-		klog.Error(err)
+		slog.Error("Failed to marshal admission response", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(respBytes); err != nil {
-		klog.Error(err)
+		slog.Error("Failed to write admission response", "err", err)
 	}
 }
 
@@ -205,13 +209,14 @@ func readAdmissionReview(data []byte) (*admissionv1.AdmissionReview, error) {
 
 func admitResourceClaimParameters(_ string) func(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	return func(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-		klog.V(2).Info("admitting resource claim parameters")
+		slog.Debug("Admitting resource claim parameters")
 
 		switch ar.Request.Resource {
 		case resourceClaimResourceV1, resourceClaimResourceV1Beta1, resourceClaimResourceV1Beta2:
 			_, extractErr := extractResourceClaim(ar)
 			if extractErr != nil {
-				klog.Error(extractErr)
+				slog.Warn("Rejected resource claim parameters", "err", extractErr,
+					"requestUID", string(ar.Request.UID), "namespace", ar.Request.Namespace, "name", ar.Request.Name)
 				return &admissionv1.AdmissionResponse{
 					Result: &metav1.Status{
 						Message: extractErr.Error(),
@@ -222,7 +227,8 @@ func admitResourceClaimParameters(_ string) func(ar admissionv1.AdmissionReview)
 		case resourceClaimTemplateResourceV1, resourceClaimTemplateResourceV1Beta1, resourceClaimTemplateResourceV1Beta2:
 			_, extractErr := extractResourceClaimTemplate(ar)
 			if extractErr != nil {
-				klog.Error(extractErr)
+				slog.Warn("Rejected resource claim template parameters", "err", extractErr,
+					"requestUID", string(ar.Request.UID), "namespace", ar.Request.Namespace, "name", ar.Request.Name)
 				return &admissionv1.AdmissionResponse{
 					Result: &metav1.Status{
 						Message: extractErr.Error(),
@@ -239,7 +245,8 @@ func admitResourceClaimParameters(_ string) func(ar admissionv1.AdmissionReview)
 				},
 				ar.Request.Resource,
 			)
-			klog.Error(msg)
+			slog.Warn("Rejected request for unexpected resource",
+				"resource", ar.Request.Resource.String(), "requestUID", string(ar.Request.UID))
 			return &admissionv1.AdmissionResponse{
 				Result: &metav1.Status{
 					Message: msg,

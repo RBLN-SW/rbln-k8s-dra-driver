@@ -21,12 +21,12 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
-	"k8s.io/klog/v2"
 )
 
 type driver struct {
@@ -68,6 +68,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
 
+	// Logged before the call so a publish failure is not silent.
+	logging.FromContext(ctx).Info("Publishing node devices",
+		"deviceCount", len(state.allocatable), "pool", config.flags.nodeName)
 	if err := helper.PublishResources(ctx, state.driverResources); err != nil {
 		return nil, err
 	}
@@ -75,16 +78,16 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	return driver, nil
 }
 
-func (d *driver) Shutdown(logger klog.Logger) error {
+func (d *driver) Shutdown() error {
 	if d.healthcheck != nil {
-		d.healthcheck.Stop(logger)
+		d.healthcheck.Stop()
 	}
 	d.helper.Stop()
 	return nil
 }
 
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
-	klog.Infof("PrepareResourceClaims is called: number of claims: %d", len(claims))
+	logging.FromContext(ctx).Info("Received request to prepare resource claims", "count", len(claims))
 	result := make(map[types.UID]kubeletplugin.PrepareResult)
 
 	for _, claim := range claims {
@@ -94,9 +97,19 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 	return result, nil
 }
 
-func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
-	preparedPBs, err := d.state.Prepare(claim)
+func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	// Identify the claim the way an operator holds it — they start from a
+	// pending pod, not a UID — and let everything downstream inherit it.
+	ctx = logging.WithValues(ctx, "claimUID", string(claim.UID),
+		"claimNamespace", claim.Namespace, "claimName", claim.Name)
+	logger := logging.FromContext(ctx)
+
+	preparedPBs, err := d.state.Prepare(ctx, claim)
 	if err != nil {
+		// Logged here as well as returned: kubelet surfaces the error on the
+		// pod, but an operator reading only the driver's log would otherwise
+		// see nothing at all for a claim that never becomes ready.
+		logger.Error("Failed to prepare devices for claim", "err", err)
 		return kubeletplugin.PrepareResult{
 			Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
 		}
@@ -111,12 +124,17 @@ func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.Reso
 		})
 	}
 
-	klog.Infof("Returning newly prepared devices for claim '%v': %v", claim.UID, prepared)
+	deviceNames := make([]string, 0, len(prepared))
+	for _, p := range prepared {
+		deviceNames = append(deviceNames, p.DeviceName)
+	}
+	logger.Info("Prepared devices for claim", "devices", deviceNames)
+	logger.Debug("Prepared device details", "devices", prepared)
 	return kubeletplugin.PrepareResult{Devices: prepared}
 }
 
 func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
-	klog.Infof("UnprepareResourceClaims is called: number of claims: %d", len(claims))
+	logging.FromContext(ctx).Info("Received request to unprepare resource claims", "count", len(claims))
 	result := make(map[types.UID]error)
 
 	for _, claim := range claims {
@@ -126,8 +144,14 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletpl
 	return result, nil
 }
 
-func (d *driver) unprepareResourceClaim(_ context.Context, claim kubeletplugin.NamespacedObject) error {
-	if err := d.state.Unprepare(string(claim.UID)); err != nil {
+func (d *driver) unprepareResourceClaim(ctx context.Context, claim kubeletplugin.NamespacedObject) error {
+	ctx = logging.WithValues(ctx, "claimUID", string(claim.UID),
+		"claimNamespace", claim.Namespace, "claimName", claim.Name)
+
+	if err := d.state.Unprepare(ctx, string(claim.UID)); err != nil {
+		// Same reasoning as prepare: a leaked device node is invisible to an
+		// operator who only has the driver's log.
+		logging.FromContext(ctx).Error("Failed to unprepare devices for claim", "err", err)
 		return fmt.Errorf("error unpreparing devices for claim %v: %w", claim.UID, err)
 	}
 

@@ -35,6 +35,7 @@ import (
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	"github.com/rbln-sw/rblnlib-go/pkg/device"
 	"github.com/rbln-sw/rblnlib-go/pkg/rsdgroup"
 )
@@ -63,22 +64,22 @@ type DeviceState struct {
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	driverResources, allocatable, err := enumerateNpuDevices(ctx, config.flags.nodeName)
 	if err != nil {
-		return nil, fmt.Errorf("error enumerating all possible devices: %v", err)
+		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
 
 	cdi, err := NewCDIHandler(config.flags.cdiRoot, config.flags.driverName, "npu")
 	if err != nil {
-		return nil, fmt.Errorf("unable to create CDI handler: %v", err)
+		return nil, fmt.Errorf("unable to create CDI handler: %w", err)
 	}
 
-	err = cdi.CreateCommonSpecFile()
+	err = cdi.CreateCommonSpecFile(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create CDI spec file for common edits: %v", err)
+		return nil, fmt.Errorf("unable to create CDI spec file for common edits: %w", err)
 	}
 
 	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
 	if err != nil {
-		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
+		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
 	}
 
 	state := &DeviceState{
@@ -92,7 +93,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
-		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
+		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
 	}
 
 	if slices.Contains(checkpoints, DriverPluginCheckpointFile) {
@@ -101,78 +102,91 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	checkpoint := newCheckpoint()
 	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
 	return state, nil
 }
 
-func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
+func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
 	s.Lock()
 	defer s.Unlock()
 
+	logger := logging.FromContext(ctx)
 	claimUID := string(claim.UID)
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync from checkpoint: %w", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
+		// Distinguishing a checkpoint replay from a fresh prepare is what tells
+		// an operator whether a restart reused state or rebuilt it.
+		logger.Debug("Claim already prepared, reusing checkpointed devices",
+			"deviceCount", len(preparedClaims[claimUID]))
 		return preparedClaims[claimUID].
 			GetDevices(), nil
 	}
 
-	preparedDevices, err := s.prepareDevices(claim)
+	preparedDevices, err := s.prepareDevices(ctx, claim)
 	if err != nil {
-		return nil, fmt.Errorf("prepare failed: %v", err)
+		return nil, fmt.Errorf("prepare failed: %w", err)
 	}
 
-	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
-		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
+	if err = s.cdi.CreateClaimSpecFile(ctx, claimUID, preparedDevices); err != nil {
+		return nil, fmt.Errorf("unable to create CDI spec file for claim: %w", err)
 	}
 
 	preparedClaims[claimUID] = preparedDevices
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
 	return preparedClaims[claimUID].GetDevices(), nil
 }
 
-func (s *DeviceState) Unprepare(claimUID string) error {
+func (s *DeviceState) Unprepare(ctx context.Context, claimUID string) error {
 	s.Lock()
 	defer s.Unlock()
 
+	logger := logging.FromContext(ctx)
+
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return fmt.Errorf("unable to sync from checkpoint: %w", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] == nil {
+		// A legitimate no-op, but a silent one leaves an operator chasing
+		// leaked device nodes with no evidence either way.
+		logger.Debug("No prepared state for claim, nothing to unprepare")
 		return nil
 	}
 
 	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
-		return fmt.Errorf("unprepare failed: %v", err)
+		return fmt.Errorf("unprepare failed: %w", err)
 	}
 
-	err := s.cdi.DeleteClaimSpecFile(claimUID)
+	err := s.cdi.DeleteClaimSpecFile(ctx, claimUID)
 	if err != nil {
-		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
+		return fmt.Errorf("unable to delete CDI spec file for claim: %w", err)
 	}
 
 	delete(preparedClaims, claimUID)
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
+	logger.Info("Unprepared devices for claim")
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+	logger := logging.FromContext(ctx)
+
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
@@ -197,11 +211,21 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	hostRsdPath := ""
 	if len(busIDs) > 0 {
 		hostRsdPath = s.rsdGroupFn(busIDs)
+		if hostRsdPath == "" {
+			// applyConfig skips the shared node when the path is empty, so the
+			// container starts with only its own NPUs, the pod goes Ready, and
+			// peer communication is broken with nothing else to show for it.
+			// This record is the only signal that the pod is quietly degraded.
+			logger.Error("RSD group creation returned no device path; containers for this claim will have no /dev/rsd0 and multi-NPU peer communication will not work",
+				"busIDs", busIDs)
+		} else {
+			logger.Info("Created RSD group device", "hostRsdPath", hostRsdPath, "busIDs", busIDs)
+		}
 	}
 
 	var preparedDevices PreparedDevices
 	for _, result := range results {
-		edits, err := s.applyConfig(result.Device, hostRsdPath)
+		edits, err := s.applyConfig(ctx, result.Device, hostRsdPath)
 		if err != nil {
 			return nil, err
 		}
@@ -224,8 +248,8 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 	return nil
 }
 
-func newDeviceNode(containerPath, hostPath string) (*cdispec.DeviceNode, error) {
-	if _, err := waitForDeviceNode(hostPath); err != nil {
+func newDeviceNode(ctx context.Context, containerPath, hostPath string) (*cdispec.DeviceNode, error) {
+	if _, err := waitForDeviceNode(ctx, hostPath); err != nil {
 		return nil, fmt.Errorf("stat device %q: %w", hostPath, err)
 	}
 	return &cdispec.DeviceNode{
@@ -234,11 +258,21 @@ func newDeviceNode(containerPath, hostPath string) (*cdispec.DeviceNode, error) 
 	}, nil
 }
 
-func waitForDeviceNode(hostPath string) (os.FileInfo, error) {
+// waitForDeviceNode polls because a freshly created RSD group node can lag the
+// call that created it. The wait is logged so a multi-second stall in prepare is
+// attributable; the timeout error itself is not logged here, it is returned and
+// logged once at the driver boundary with the claim attached.
+func waitForDeviceNode(ctx context.Context, hostPath string) (os.FileInfo, error) {
 	deadline := time.Now().Add(deviceNodePollTimeout)
+	started := time.Now()
+	waited := false
 	for {
 		fi, err := os.Stat(hostPath)
 		if err == nil {
+			if waited {
+				logging.FromContext(ctx).Debug("Device node appeared",
+					"hostPath", hostPath, "waited", time.Since(started).String())
+			}
 			return fi, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
@@ -247,14 +281,19 @@ func waitForDeviceNode(hostPath string) (os.FileInfo, error) {
 		if time.Now().After(deadline) {
 			return nil, err
 		}
+		if !waited {
+			waited = true
+			logging.FromContext(ctx).Debug("Waiting for device node to appear",
+				"hostPath", hostPath, "timeout", deviceNodePollTimeout.String())
+		}
 		time.Sleep(deviceNodePollInterval)
 	}
 }
 
-func (s *DeviceState) applyConfig(deviceName, hostRsdPath string) (*cdispec.ContainerEdits, error) {
+func (s *DeviceState) applyConfig(ctx context.Context, deviceName, hostRsdPath string) (*cdispec.ContainerEdits, error) {
 	edits := &cdispec.ContainerEdits{}
 	if hostRsdPath != "" {
-		rsdNode, err := newDeviceNode("/dev/rsd0", hostRsdPath)
+		rsdNode, err := newDeviceNode(ctx, "/dev/rsd0", hostRsdPath)
 		if err != nil {
 			return nil, fmt.Errorf("rsd device node: %w", err)
 		}
@@ -265,7 +304,7 @@ func (s *DeviceState) applyConfig(deviceName, hostRsdPath string) (*cdispec.Cont
 		return nil, fmt.Errorf("allocatable device %q not found", deviceName)
 	}
 	rblnPath := fmt.Sprintf("/dev/%s", allocatable.Name)
-	rblnNode, err := newDeviceNode(rblnPath, rblnPath)
+	rblnNode, err := newDeviceNode(ctx, rblnPath, rblnPath)
 	if err != nil {
 		return nil, fmt.Errorf("rbln device node: %w", err)
 	}
@@ -286,10 +325,33 @@ func (s *DeviceState) getPCIBusIDs(results []*resourceapi.DeviceRequestAllocatio
 	return busIDs, nil
 }
 
+// setNumaNodeAttr adds the numaNode attribute for a device, or reports why it
+// could not. Dropping it silently degrades topology-aware allocation with no
+// way to tell from the outside that the device lost its NUMA affinity.
+func setNumaNodeAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, deviceName, numaNode string) {
+	if numaNode == "" {
+		return
+	}
+	v, err := strconv.ParseInt(numaNode, 10, 64)
+	if err != nil {
+		logging.FromContext(ctx).Warn("Ignoring unparseable NUMA node; this device will be published without a numaNode attribute",
+			"device", deviceName, "numaNode", numaNode, "err", err)
+		return
+	}
+	attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
+}
+
 func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.DriverResources, AllocatableDevices, error) {
+	logger := logging.FromContext(ctx)
+
 	devs, err := device.GetDevices(ctx)
 	if err != nil {
 		return resourceslice.DriverResources{}, nil, err
+	}
+	if len(devs) == 0 {
+		// The DaemonSet only lands on nodes labelled as having NPUs, so zero
+		// devices means the label, the kernel driver and reality disagree.
+		logger.Warn("No NPU devices found on this node; the published ResourceSlice will be empty")
 	}
 
 	allocatable := make(AllocatableDevices)
@@ -330,11 +392,7 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 				StringValue: ptr.To(d.KMDVersion),
 			},
 		}
-		if d.PCINumaNode != "" {
-			if v, err := strconv.ParseInt(d.PCINumaNode, 10, 64); err == nil {
-				attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
-			}
-		}
+		setNumaNodeAttr(ctx, attrs, d.Name, d.PCINumaNode)
 		device := resourceapi.Device{
 			Name:       d.Name,
 			Attributes: attrs,
@@ -346,6 +404,14 @@ func enumerateNpuDevices(ctx context.Context, nodeName string) (resourceslice.Dr
 				},
 			}
 		}
+		// Per-device detail is what answers "the slice shows N devices but the
+		// node has M".
+		logger.Debug("Enumerated NPU device",
+			"device", d.Name, "productName", d.ProductName, "uuid", d.UUID,
+			"pciBusID", d.PCIBusID, "pcieRoot", d.PCIERootID, "numaNode", d.PCINumaNode,
+			"firmwareVersion", d.FirmwareVersion, "driverVersion", d.KMDVersion,
+			"memoryTotalBytes", d.MemoryTotalBytes)
+
 		devices = append(devices, device)
 		allocatable[d.Name] = device
 	}
