@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-GOLANG_VERSION ?= 1.25.7
+GOLANG_VERSION ?= 1.25.13
+
+# Read by .github/workflows/image-scan.yaml so CI and `make scan` agree on the
+# scanner version.
+TRIVY_VERSION ?= v0.74.0
 
 MODULE := github.com/RBLN-SW/k8s-dra-driver-npu
 
