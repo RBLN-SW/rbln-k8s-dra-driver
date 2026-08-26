@@ -23,7 +23,7 @@ IMAGE_TAG := $(VERSION)
 IMAGE = $(IMAGE_NAME):$(IMAGE_TAG)
 
 ##### Public rules #####
-.PHONY: $(DISTRIBUTIONS) build push
+.PHONY: $(DISTRIBUTIONS) build push scan
 
 build: ubuntu22.04
 
@@ -42,4 +42,14 @@ $(DISTRIBUTIONS):
 
 push:
 	docker push $(IMAGE)
+
+# Same gate the PR workflow applies, runnable before pushing. `--ignore-unfixed`
+# and the HIGH,CRITICAL filter mirror the jq filter in image-scan.yaml.
+scan: build
+	@command -v trivy >/dev/null || { \
+		echo "trivy not found: https://trivy.dev/latest/getting-started/installation/"; \
+		exit 1; \
+	}
+	trivy image --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+		--ignorefile $(CURDIR)/.trivyignore.yaml --exit-code 1 $(IMAGE)
 
