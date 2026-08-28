@@ -16,6 +16,13 @@
 MKDIR ?= mkdir
 DISTRIBUTIONS := ubuntu22.04
 DOCKERFILE := $(CURDIR)/deployments/container/Dockerfile
+PUSH_ON_BUILD ?= false
+
+ifeq ($(PUSH_ON_BUILD),true)
+OUTPUT_OPTION = --push
+else
+OUTPUT_OPTION = --load
+endif
 
 include $(CURDIR)/common.mk
 
@@ -23,7 +30,7 @@ IMAGE_TAG := $(VERSION)
 IMAGE = $(IMAGE_NAME):$(IMAGE_TAG)
 
 ##### Public rules #####
-.PHONY: $(DISTRIBUTIONS) build push scan
+.PHONY: $(DISTRIBUTIONS) build scan
 
 build: ubuntu22.04
 
@@ -32,16 +39,14 @@ ubuntu22.04: BASE_IMAGE = docker.io/ubuntu:22.04
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
 	DOCKER_BUILDKIT=1 \
-		docker build --pull \
+		docker buildx build --pull \
+		$(OUTPUT_OPTION) \
 		--tag $(IMAGE) \
 		--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
 		--build-arg VERSION="$(VERSION)" \
 		-f $(DOCKERFILE) \
 		$(CURDIR)
-
-push:
-	docker push $(IMAGE)
 
 # Same gate the PR workflow applies, runnable before pushing. `--ignore-unfixed`
 # and the HIGH,CRITICAL filter mirror the jq filter in image-scan.yaml.
