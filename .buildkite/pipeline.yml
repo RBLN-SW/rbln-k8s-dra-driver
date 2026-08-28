@@ -88,10 +88,6 @@ agents:
 
 steps:
   # DinD: buildx-ci (docker CLI) + privileged docker:dind sidecar over DOCKER_HOST.
-  # This repo's deployments/container/Makefile uses plain `docker build`/`docker
-  # push` (not buildx --output=push), so the default `docker` driver is required
-  # — `push` reads the image from the local daemon store. Do NOT create a
-  # docker-container builder here or `make push` would find nothing to push.
   - label: ":docker: build & push image"
     key: build-image
     timeout_in_minutes: 30
@@ -133,10 +129,11 @@ steps:
       echo "$$REBEL_SW_DEV_PASSWORD" | docker login "${HARBOR_HOST}" \
         --username "$$REBEL_SW_DEV_USERNAME" --password-stdin
 
-      make -f deployments/container/Makefile build push \
+      make -f deployments/container/Makefile build \
         IMAGE_NAME="${IMAGE_NAME}" \
         IMAGE_TAG="$$IMAGE_TAG" \
-        VERSION="$$IMAGE_TAG"
+        VERSION="$$IMAGE_TAG" \
+        PUSH_ON_BUILD=true
 
   - label: ":pytest: dra scenario"
     key: dra
