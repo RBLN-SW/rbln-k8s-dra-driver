@@ -30,13 +30,13 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
-	"k8s.io/klog/v2"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/utils/ptr"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	"github.com/rbln-sw/rblnlib-go/pkg/device"
 	"github.com/rbln-sw/rblnlib-go/pkg/rsdgroup"
 )
@@ -77,12 +77,16 @@ type DeviceState struct {
 }
 
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
-	logger := klog.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	npuDevices, npuErr := enumerateNpuDevices(ctx, sysfsPCIDevicesRoot)
-	vfioDevices, vfioErr := enumerateVfioDevices(sysfsPCIDevicesRoot)
+	vfioDevices, vfioErr := enumerateVfioDevices(ctx, sysfsPCIDevicesRoot)
 	if vfioErr != nil {
-		logger.Error(vfioErr, "Unable to enumerate vfio-pci NPU devices")
+		// Not fatal: a container-only node is unaffected and the periodic
+		// rescan retries. Error rather than warn because on a passthrough
+		// node this is the record that explains why no VM can be scheduled.
+		logger.Error("Failed to enumerate vfio-pci NPU devices", "err", vfioErr,
+			"impact", "no passthrough device is published until a rescan succeeds")
 		vfioDevices = nil
 	}
 	// Nodes are converted to vfio as a whole (vfio-manager binds --all), so
@@ -96,28 +100,52 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	// before allowing mixed nodes.
 	if npuErr != nil {
 		if len(vfioDevices) == 0 {
-			return nil, fmt.Errorf("error enumerating all possible devices: %v", npuErr)
+			return nil, fmt.Errorf("error enumerating all possible devices: %w", npuErr)
 		}
-		logger.Info("rbln-smi enumeration unavailable, continuing with vfio-pci devices only", "reason", npuErr)
+		logger.Info("rbln-smi enumeration unavailable, continuing with vfio-pci devices only", "err", npuErr)
 		npuDevices = nil
+	}
+	if len(npuDevices) == 0 && len(vfioDevices) == 0 {
+		// The DaemonSet only lands on nodes labelled as having NPUs, so zero
+		// devices of either kind means the label, the kernel driver and
+		// reality disagree.
+		logger.Warn("No NPU devices found on this node",
+			"impact", "the published ResourceSlice will be empty and no pod can be scheduled here")
+	}
+	// Per-device detail is what answers "the slice shows N devices but the
+	// node has M". Logged once here rather than in the enumeration, which
+	// the rescan loop repeats every tick.
+	for _, d := range vfioDevices {
+		logger.Debug("Enumerated vfio-pci NPU device",
+			"device", d.Name,
+			"productName", deviceStringAttr(d, "productName"),
+			"pciDeviceID", deviceStringAttr(d, "pciDeviceID"),
+			"pciBusID", deviceStringAttr(d, pciBusIDAttributeKey),
+			"pcieRoot", deviceStringAttr(d, pcieRootAttributeKey),
+			"iommuGroup", deviceIntAttr(d, iommuGroupAttributeKey),
+			"numaNode", deviceIntAttr(d, numaNodeAttributeKey),
+			"vf", deviceBoolAttr(d, "vf"))
 	}
 
 	cdi, err := NewCDIHandler(config.flags.cdiRoot, config.flags.driverName, "npu")
 	if err != nil {
-		return nil, fmt.Errorf("unable to create CDI handler: %v", err)
+		return nil, fmt.Errorf("unable to create CDI handler: %w", err)
 	}
 
-	err = cdi.CreateCommonSpecFile()
+	err = cdi.CreateCommonSpecFile(ctx)
 	if err != nil {
 		if len(npuDevices) > 0 {
-			return nil, fmt.Errorf("unable to create CDI spec file for common edits: %v", err)
+			return nil, fmt.Errorf("unable to create CDI spec file for common edits: %w", err)
 		}
-		logger.Info("Skipping common CDI spec file, RBLN runtime spec unavailable", "reason", err)
+		// The runtime spec is written by the RBLN container toolkit, which a
+		// passthrough-only node does not run. vfio claims never reference
+		// the common CDI device, so nothing is degraded.
+		logger.Info("Skipping common CDI spec file, RBLN runtime spec unavailable", "err", err)
 	}
 
 	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
 	if err != nil {
-		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
+		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
 	}
 
 	state := &DeviceState{
@@ -134,7 +162,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
-		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
+		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
 	}
 
 	if slices.Contains(checkpoints, DriverPluginCheckpointFile) {
@@ -143,7 +171,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	checkpoint := newCheckpoint()
 	if err := state.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
 	return state, nil
@@ -182,8 +210,8 @@ func (s *DeviceState) DriverResources() resourceslice.DriverResources {
 // enumerated at startup. Converting a node to/from vfio-pci therefore relies
 // on the plugin being restarted (the current operational procedure) — without
 // a restart, a rebound device would be advertised as both npu and vfio.
-func (s *DeviceState) RescanVfioDevices() (resourceslice.DriverResources, bool, error) {
-	vfioDevices, err := enumerateVfioDevices(s.sysfsPCIDevicesRoot)
+func (s *DeviceState) RescanVfioDevices(ctx context.Context) (resourceslice.DriverResources, bool, error) {
+	vfioDevices, err := enumerateVfioDevices(ctx, s.sysfsPCIDevicesRoot)
 	if err != nil {
 		return resourceslice.DriverResources{}, false, err
 	}
@@ -197,31 +225,69 @@ func (s *DeviceState) RescanVfioDevices() (resourceslice.DriverResources, bool, 
 		return s.driverResources, false, nil
 	}
 
+	// Name the delta: a device that disappears from the slice while a VM is
+	// scheduled on it is the thing an operator has to explain, and the ticker
+	// gives no other hint of when it happened.
+	added, removed := deviceNameDelta(s.vfioDevices, vfioDevices)
+	logging.FromContext(ctx).Info("vfio-pci NPU devices changed, republishing resources",
+		"added", added, "removed", removed, "vfioDeviceCount", len(vfioDevices))
+
 	s.vfioDevices = vfioDevices
 	s.rebuildResources()
 	return s.driverResources, true, nil
 }
 
-func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
+// deviceNameDelta returns the names present only in next (added) and only in
+// prev (removed). A device whose attributes changed appears in neither: it is
+// still republished, but the record only has to name arrivals and departures.
+func deviceNameDelta(prev, next []resourceapi.Device) (added, removed []string) {
+	names := func(devices []resourceapi.Device) map[string]struct{} {
+		set := make(map[string]struct{}, len(devices))
+		for _, d := range devices {
+			set[d.Name] = struct{}{}
+		}
+		return set
+	}
+	prevNames, nextNames := names(prev), names(next)
+	added, removed = []string{}, []string{}
+	for _, d := range next {
+		if _, ok := prevNames[d.Name]; !ok {
+			added = append(added, d.Name)
+		}
+	}
+	for _, d := range prev {
+		if _, ok := nextNames[d.Name]; !ok {
+			removed = append(removed, d.Name)
+		}
+	}
+	return added, removed
+}
+
+func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]*drapbv1.Device, error) {
 	s.Lock()
 	defer s.Unlock()
 
+	logger := logging.FromContext(ctx)
 	claimUID := string(claim.UID)
 
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return nil, fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return nil, fmt.Errorf("unable to sync from checkpoint: %w", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] != nil {
+		// Distinguishing a checkpoint replay from a fresh prepare is what tells
+		// an operator whether a restart reused state or rebuilt it.
+		logger.Debug("Claim already prepared, reusing checkpointed devices",
+			"deviceCount", len(preparedClaims[claimUID]))
 		return preparedClaims[claimUID].
 			GetDevices(), nil
 	}
 
-	preparedDevices, err := s.prepareDevices(claim)
+	preparedDevices, err := s.prepareDevices(ctx, claim)
 	if err != nil {
-		return nil, fmt.Errorf("prepare failed: %v", err)
+		return nil, fmt.Errorf("prepare failed: %w", err)
 	}
 
 	// Write the metadata before the CDI spec: the spec bind-mounts the
@@ -232,23 +298,35 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) ([]*drapbv1.Devi
 	// checkpoint does not record.
 	if s.claimHasVfioDevice(claim) {
 		if err := writeKubeVirtMetadata(kubevirtMetadataBasePath, claim, s.driverName, s.allocatable); err != nil {
-			_ = removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID)
-			return nil, fmt.Errorf("unable to write KubeVirt device metadata: %v", err)
+			s.rollbackKubeVirtMetadata(ctx, claimUID)
+			return nil, fmt.Errorf("unable to write KubeVirt device metadata: %w", err)
 		}
 	}
 
-	if err = s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
-		_ = removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID)
-		return nil, fmt.Errorf("unable to create CDI spec file for claim: %v", err)
+	if err = s.cdi.CreateClaimSpecFile(ctx, claimUID, preparedDevices); err != nil {
+		s.rollbackKubeVirtMetadata(ctx, claimUID)
+		return nil, fmt.Errorf("unable to create CDI spec file for claim: %w", err)
 	}
 
 	preparedClaims[claimUID] = preparedDevices
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		_ = removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID)
-		return nil, fmt.Errorf("unable to sync to checkpoint: %v", err)
+		s.rollbackKubeVirtMetadata(ctx, claimUID)
+		return nil, fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
 	return preparedClaims[claimUID].GetDevices(), nil
+}
+
+// rollbackKubeVirtMetadata removes whatever metadata a failed Prepare left
+// behind. The prepare error itself is what the caller returns and logs; the
+// rollback failure is only logged here because nothing else would mention it,
+// and the leftover directory blocks a later claim with the same name.
+func (s *DeviceState) rollbackKubeVirtMetadata(ctx context.Context, claimUID string) {
+	if err := removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID); err != nil {
+		logging.FromContext(ctx).Warn("Failed to roll back KubeVirt device metadata after prepare failure",
+			"err", err,
+			"impact", "a later claim with the same name on this node fails to prepare until the directory is removed")
+	}
 }
 
 // Callers must hold the lock.
@@ -267,42 +345,55 @@ func (s *DeviceState) claimHasVfioDevice(claim *resourceapi.ResourceClaim) bool 
 	return false
 }
 
-func (s *DeviceState) Unprepare(claimUID string) error {
+func (s *DeviceState) Unprepare(ctx context.Context, claimUID string) error {
 	s.Lock()
 	defer s.Unlock()
 
+	logger := logging.FromContext(ctx)
+
 	checkpoint := newCheckpoint()
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return fmt.Errorf("unable to sync from checkpoint: %v", err)
+		return fmt.Errorf("unable to sync from checkpoint: %w", err)
 	}
 	preparedClaims := checkpoint.V1.PreparedClaims
 
 	if preparedClaims[claimUID] == nil {
+		// A legitimate no-op, but a silent one leaves an operator chasing
+		// leaked device nodes with no evidence either way.
+		logger.Debug("No prepared state for claim, nothing to unprepare")
 		return nil
 	}
 
+	// Captured before the delete below, so the record can name what was torn
+	// down. Prepare logs the device names it injected; without the same names
+	// here an operator cannot reconcile the two halves of a claim's lifecycle.
+	deviceNames := preparedClaims[claimUID].GetDeviceNames()
+
 	if err := s.unprepareDevices(claimUID, preparedClaims[claimUID]); err != nil {
-		return fmt.Errorf("unprepare failed: %v", err)
+		return fmt.Errorf("unprepare failed: %w", err)
 	}
 
-	err := s.cdi.DeleteClaimSpecFile(claimUID)
+	err := s.cdi.DeleteClaimSpecFile(ctx, claimUID)
 	if err != nil {
-		return fmt.Errorf("unable to delete CDI spec file for claim: %v", err)
+		return fmt.Errorf("unable to delete CDI spec file for claim: %w", err)
 	}
 
 	if err := removeKubeVirtMetadataForClaim(kubevirtMetadataBasePath, claimUID); err != nil {
-		return fmt.Errorf("unable to remove KubeVirt device metadata: %v", err)
+		return fmt.Errorf("unable to remove KubeVirt device metadata: %w", err)
 	}
 
 	delete(preparedClaims, claimUID)
 	if err := s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFile, checkpoint); err != nil {
-		return fmt.Errorf("unable to sync to checkpoint: %v", err)
+		return fmt.Errorf("unable to sync to checkpoint: %w", err)
 	}
 
+	logger.Info("Unprepared devices for claim", "devices", deviceNames)
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+	logger := logging.FromContext(ctx)
+
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
@@ -334,13 +425,30 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 	}
 
 	hostRsdPath := ""
+	var rdsNodes []*cdispec.DeviceNode
 	if len(npuBusIDs) > 0 {
 		hostRsdPath = s.rsdGroupFn(npuBusIDs)
-	}
+		if hostRsdPath == "" {
+			// applyConfig skips the shared node when the path is empty, so the
+			// container starts with only its own NPUs, the pod goes Ready, and
+			// peer communication is broken with nothing else to show for it.
+			// This record is the only signal that the pod is quietly degraded;
+			// "impact" states that in the record because the message alone
+			// reads like a transient failure the caller retried.
+			logger.Error("RSD group creation returned no device path",
+				"busIDs", npuBusIDs,
+				"impact", "containers get no /dev/rsd0; multi-NPU peer communication disabled")
+		} else {
+			logger.Info("Created RSD group device", "hostRsdPath", hostRsdPath, "busIDs", npuBusIDs)
+		}
 
-	rdsNodes, err := s.cdi.getRDSDeviceNodes()
-	if err != nil {
-		klog.Warningf("reading RDS CDI spec failed for claim %s, continuing without RDS: %v", claim.UID, err)
+		// RDS, like the RSD group, only exists for devices driven by the
+		// rebellions kernel driver; a passthrough-only claim never needs it.
+		var err error
+		rdsNodes, err = s.cdi.getRDSDeviceNodes()
+		if err != nil {
+			logger.Warn("Reading RDS CDI spec failed, continuing without RDS", "err", err)
+		}
 	}
 
 	metadataDirs := kubevirtMetadataClaimDirs(kubevirtMetadataBasePath, claim)
@@ -353,9 +461,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 
 		vfio := isVfioDevice(s.allocatable[result.Device])
 		if vfio {
-			edits, err = vfioContainerEdits(s.allocatable[result.Device], metadataDirs)
+			edits, err = vfioContainerEdits(ctx, s.allocatable[result.Device], metadataDirs)
 		} else {
-			edits, err = s.applyConfig(result.Device, hostRsdPath)
+			edits, err = s.applyConfig(ctx, result.Device, hostRsdPath)
 		}
 		if err != nil {
 			return nil, err
@@ -387,8 +495,8 @@ func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices)
 	return nil
 }
 
-func newDeviceNode(containerPath, hostPath string) (*cdispec.DeviceNode, error) {
-	if _, err := waitForDeviceNode(hostPath); err != nil {
+func newDeviceNode(ctx context.Context, containerPath, hostPath string) (*cdispec.DeviceNode, error) {
+	if _, err := waitForDeviceNode(ctx, hostPath); err != nil {
 		return nil, fmt.Errorf("stat device %q: %w", hostPath, err)
 	}
 	return &cdispec.DeviceNode{
@@ -397,11 +505,21 @@ func newDeviceNode(containerPath, hostPath string) (*cdispec.DeviceNode, error) 
 	}, nil
 }
 
-func waitForDeviceNode(hostPath string) (os.FileInfo, error) {
+// waitForDeviceNode polls because a freshly created RSD group node can lag the
+// call that created it. The wait is logged so a multi-second stall in prepare is
+// attributable; the timeout error itself is not logged here, it is returned and
+// logged once at the driver boundary with the claim attached.
+func waitForDeviceNode(ctx context.Context, hostPath string) (os.FileInfo, error) {
 	deadline := time.Now().Add(deviceNodePollTimeout)
+	started := time.Now()
+	waited := false
 	for {
 		fi, err := os.Stat(hostPath)
 		if err == nil {
+			if waited {
+				logging.FromContext(ctx).Debug("Device node appeared",
+					"hostPath", hostPath, "waited", time.Since(started).String())
+			}
 			return fi, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
@@ -410,14 +528,19 @@ func waitForDeviceNode(hostPath string) (os.FileInfo, error) {
 		if time.Now().After(deadline) {
 			return nil, err
 		}
+		if !waited {
+			waited = true
+			logging.FromContext(ctx).Debug("Waiting for device node to appear",
+				"hostPath", hostPath, "timeout", deviceNodePollTimeout.String())
+		}
 		time.Sleep(deviceNodePollInterval)
 	}
 }
 
-func (s *DeviceState) applyConfig(deviceName, hostRsdPath string) (*cdispec.ContainerEdits, error) {
+func (s *DeviceState) applyConfig(ctx context.Context, deviceName, hostRsdPath string) (*cdispec.ContainerEdits, error) {
 	edits := &cdispec.ContainerEdits{}
 	if hostRsdPath != "" {
-		rsdNode, err := newDeviceNode("/dev/rsd0", hostRsdPath)
+		rsdNode, err := newDeviceNode(ctx, "/dev/rsd0", hostRsdPath)
 		if err != nil {
 			return nil, fmt.Errorf("rsd device node: %w", err)
 		}
@@ -428,7 +551,7 @@ func (s *DeviceState) applyConfig(deviceName, hostRsdPath string) (*cdispec.Cont
 		return nil, fmt.Errorf("allocatable device %q not found", deviceName)
 	}
 	rblnPath := fmt.Sprintf("/dev/%s", allocatable.Name)
-	rblnNode, err := newDeviceNode(rblnPath, rblnPath)
+	rblnNode, err := newDeviceNode(ctx, rblnPath, rblnPath)
 	if err != nil {
 		return nil, fmt.Errorf("rbln device node: %w", err)
 	}
@@ -444,7 +567,82 @@ func devicePCIBusID(device resourceapi.Device) (string, error) {
 	return *attr.StringValue, nil
 }
 
+// deviceStringAttr, deviceIntAttr and deviceBoolAttr unwrap an attribute for
+// logging. The typed values are pointers, which the text handler would render
+// as addresses; nil stands for "unset" so the key still appears in the record.
+func deviceStringAttr(device resourceapi.Device, key resourceapi.QualifiedName) string {
+	if attr, ok := device.Attributes[key]; ok && attr.StringValue != nil {
+		return *attr.StringValue
+	}
+	return ""
+}
+
+func deviceIntAttr(device resourceapi.Device, key resourceapi.QualifiedName) any {
+	if attr, ok := device.Attributes[key]; ok && attr.IntValue != nil {
+		return *attr.IntValue
+	}
+	return nil
+}
+
+func deviceBoolAttr(device resourceapi.Device, key resourceapi.QualifiedName) any {
+	if attr, ok := device.Attributes[key]; ok && attr.BoolValue != nil {
+		return *attr.BoolValue
+	}
+	return nil
+}
+
+// setNumaNodeAttr adds the numaNode attribute for a device, or reports why it
+// could not. Dropping it silently degrades topology-aware allocation with no
+// way to tell from the outside that the device lost its NUMA affinity. The
+// value is mirrored under the DraNet key so one claim can matchAttribute NPUs
+// with NICs/CPUs published by other drivers.
+func setNumaNodeAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, deviceName, numaNode string) {
+	if numaNode == "" {
+		return
+	}
+	v, err := strconv.ParseInt(numaNode, 10, 64)
+	if err != nil {
+		logging.FromContext(ctx).Warn("Ignoring unparseable NUMA node",
+			"device", deviceName, "numaNode", numaNode, "err", err,
+			"impact", "device published without a numaNode attribute")
+		return
+	}
+	if v < 0 {
+		// sysfs reports -1 for a device without NUMA affinity (single-socket
+		// hosts, or firmware that does not expose it). The standard attribute
+		// is omitted rather than published as -1, which no CPU or NIC device
+		// would match. Expected on such hosts, so debug rather than warn.
+		logging.FromContext(ctx).Debug("Device reports no NUMA affinity, omitting numaNode attribute",
+			"device", deviceName, "numaNode", numaNode)
+		return
+	}
+	attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
+	attrs[dranetNumaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
+}
+
+// setPCIERootAttr adds the standard pcieRoot attribute ("pci<domain>:<bus>",
+// KEP-4381) resolved from sysfs, or reports why it could not. It is derived
+// in-driver for npu and vfio devices alike so both enumerations agree and
+// cross-driver matchAttribute with DraNet NICs works. Returns the value set,
+// or "" when none was.
+func setPCIERootAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, deviceName, sysfsRoot, busID string) string {
+	pcieRoot, err := resolvePCIERootID(sysfsRoot, busID)
+	if err == nil && pcieRoot == "" {
+		err = errors.New("no pci<domain>:<bus> segment in the device path")
+	}
+	if err != nil {
+		logging.FromContext(ctx).Warn("Ignoring unresolvable PCIe root",
+			"device", deviceName, "pciBusID", busID, "err", err,
+			"impact", "device published without a pcieRoot attribute")
+		return ""
+	}
+	attrs[pcieRootAttributeKey] = resourceapi.DeviceAttribute{StringValue: ptr.To(pcieRoot)}
+	return pcieRoot
+}
+
 func enumerateNpuDevices(ctx context.Context, sysfsRoot string) ([]resourceapi.Device, error) {
+	logger := logging.FromContext(ctx)
+
 	devs, err := device.GetDevices(ctx)
 	if err != nil {
 		return nil, err
@@ -484,15 +682,8 @@ func enumerateNpuDevices(ctx context.Context, sysfsRoot string) ([]resourceapi.D
 				StringValue: ptr.To(d.KMDVersion),
 			},
 		}
-		if d.PCINumaNode != "" {
-			if v, err := strconv.ParseInt(d.PCINumaNode, 10, 64); err == nil && v >= 0 {
-				attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
-				attrs[dranetNumaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
-			}
-		}
-		if pcieRoot, err := resolvePCIERootID(sysfsRoot, d.PCIBusID); err == nil && pcieRoot != "" {
-			attrs[pcieRootAttributeKey] = resourceapi.DeviceAttribute{StringValue: ptr.To(pcieRoot)}
-		}
+		setNumaNodeAttr(ctx, attrs, d.Name, d.PCINumaNode)
+		pcieRoot := setPCIERootAttr(ctx, attrs, d.Name, sysfsRoot, d.PCIBusID)
 		device := resourceapi.Device{
 			Name:       d.Name,
 			Attributes: attrs,
@@ -504,6 +695,14 @@ func enumerateNpuDevices(ctx context.Context, sysfsRoot string) ([]resourceapi.D
 				},
 			}
 		}
+		// Per-device detail is what answers "the slice shows N devices but the
+		// node has M".
+		logger.Debug("Enumerated NPU device",
+			"device", d.Name, "productName", d.ProductName, "uuid", d.UUID,
+			"pciBusID", d.PCIBusID, "pcieRoot", pcieRoot, "numaNode", d.PCINumaNode,
+			"firmwareVersion", d.FirmwareVersion, "driverVersion", d.KMDVersion,
+			"memoryTotalBytes", d.MemoryTotalBytes)
+
 		devices = append(devices, device)
 	}
 

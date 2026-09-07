@@ -44,6 +44,11 @@ spec:
           - --tls-private-key-file=/cert/tls.key
           - --port={{ .Values.webhook.containerPort }}
           - --driver-name={{ include "k8s-dra-driver-npu.driverName" . }}
+        env:
+        - name: RBLN_DRA_DRIVER_LOG_LEVEL
+          value: {{ .Values.logging.level | quote }}
+        - name: RBLN_DRA_DRIVER_LOG_FORMAT
+          value: {{ .Values.logging.format | quote }}
         ports:
           - name: webhook
             containerPort: {{ .Values.webhook.containerPort }}

@@ -73,12 +73,12 @@ func (k *KubeClientConfig) NewClientSetConfig() (*rest.Config, error) {
 	if k.KubeConfig == "" {
 		csconfig, err = rest.InClusterConfig()
 		if err != nil {
-			return nil, fmt.Errorf("create in-cluster client configuration: %v", err)
+			return nil, fmt.Errorf("create in-cluster client configuration: %w", err)
 		}
 	} else {
 		csconfig, err = clientcmd.BuildConfigFromFlags("", k.KubeConfig)
 		if err != nil {
-			return nil, fmt.Errorf("create out-of-cluster client configuration: %v", err)
+			return nil, fmt.Errorf("create out-of-cluster client configuration: %w", err)
 		}
 	}
 
@@ -91,12 +91,12 @@ func (k *KubeClientConfig) NewClientSetConfig() (*rest.Config, error) {
 func (k *KubeClientConfig) NewClientSets() (ClientSets, error) {
 	csconfig, err := k.NewClientSetConfig()
 	if err != nil {
-		return ClientSets{}, fmt.Errorf("create client configuration: %v", err)
+		return ClientSets{}, fmt.Errorf("create client configuration: %w", err)
 	}
 
 	coreclient, err := coreclientset.NewForConfig(csconfig)
 	if err != nil {
-		return ClientSets{}, fmt.Errorf("create core client: %v", err)
+		return ClientSets{}, fmt.Errorf("create core client: %w", err)
 	}
 
 	return ClientSets{

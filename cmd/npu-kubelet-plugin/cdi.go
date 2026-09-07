@@ -17,11 +17,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
@@ -61,7 +64,7 @@ func NewCDIHandler(root string, driverName, class string) (*CDIHandler, error) {
 	return handler, nil
 }
 
-func (cdi *CDIHandler) CreateCommonSpecFile() error {
+func (cdi *CDIHandler) CreateCommonSpecFile(ctx context.Context) error {
 	mounts, hooks, err := cdi.getRuntimeUMDEdits()
 	if err != nil {
 		return fmt.Errorf("failed to get runtime UMD edits: %w", err)
@@ -82,7 +85,7 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 
 	minVersion, err := cdiapi.MinimumRequiredVersion(spec)
 	if err != nil {
-		return fmt.Errorf("failed to get minimum required CDI spec version: %v", err)
+		return fmt.Errorf("failed to get minimum required CDI spec version: %w", err)
 	}
 	spec.Version = minVersion
 
@@ -91,7 +94,14 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 		return fmt.Errorf("failed to generate Spec name: %w", err)
 	}
 
-	return cdi.cache.WriteSpec(spec, specName)
+	if err := cdi.cache.WriteSpec(spec, specName); err != nil {
+		return err
+	}
+	// "The container cannot find the userspace library" starts with whether the
+	// toolkit's edits were picked up at all.
+	logging.FromContext(ctx).Debug("Wrote common CDI spec with runtime edits",
+		"specName", specName, "cdiRoot", cdi.root, "mounts", len(mounts), "hooks", len(hooks))
+	return nil
 }
 
 type rblnRuntimeSpec struct {
@@ -202,7 +212,7 @@ func (cdi *CDIHandler) getRDSDeviceNodes() ([]*cdispec.DeviceNode, error) {
 	return nil, nil
 }
 
-func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevices) error {
+func (cdi *CDIHandler) CreateClaimSpecFile(ctx context.Context, claimUID string, devices PreparedDevices) error {
 	specName := cdiapi.GenerateTransientSpecName(cdi.vendor(), cdi.class, claimUID)
 
 	spec := &cdispec.Spec{
@@ -226,16 +236,37 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevi
 
 	minVersion, err := cdiapi.MinimumRequiredVersion(spec)
 	if err != nil {
-		return fmt.Errorf("failed to get minimum required CDI spec version: %v", err)
+		return fmt.Errorf("failed to get minimum required CDI spec version: %w", err)
 	}
 	spec.Version = minVersion
 
-	return cdi.cache.WriteSpec(spec, specName)
+	if err := cdi.cache.WriteSpec(spec, specName); err != nil {
+		return err
+	}
+	// CDI is the step between "the driver decided" and "the container can see
+	// it", so which host paths went in is what distinguishes a driver bug from
+	// a runtime that ignored the spec.
+	nodes := make([]string, 0, len(devices))
+	for _, device := range devices {
+		if device.ContainerEdits == nil || device.ContainerEdits.ContainerEdits == nil {
+			continue
+		}
+		for _, node := range device.ContainerEdits.DeviceNodes {
+			nodes = append(nodes, node.Path+"="+node.HostPath)
+		}
+	}
+	logging.FromContext(ctx).Debug("Wrote CDI spec for claim",
+		"specName", specName, "cdiRoot", cdi.root, "deviceNodes", nodes)
+	return nil
 }
 
-func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
+func (cdi *CDIHandler) DeleteClaimSpecFile(ctx context.Context, claimUID string) error {
 	specName := cdiapi.GenerateTransientSpecName(cdi.vendor(), cdi.class, claimUID)
-	return cdi.cache.RemoveSpec(specName)
+	if err := cdi.cache.RemoveSpec(specName); err != nil {
+		return err
+	}
+	logging.FromContext(ctx).Debug("Removed CDI spec for claim", "specName", specName)
+	return nil
 }
 
 func (cdi *CDIHandler) GetClaimDevices(claimUID string, devices []string, includeCommon bool) []string {

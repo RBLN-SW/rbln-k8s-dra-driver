@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,8 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/utils/ptr"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
+
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 )
 
 const (
@@ -51,7 +54,11 @@ var pciDeviceIDToProductName = map[string]string{
 	"1251": "RBLN-CA25",
 }
 
-func enumerateVfioDevices(root string) ([]resourceapi.Device, error) {
+// enumerateVfioDevices lists the Rebellions NPUs bound to vfio-pci under the
+// sysfs PCI devices root. It runs at startup and on every rescan tick, so it
+// only logs conditions that drop a device; per-device detail is logged by the
+// callers when the set is first seen or changes.
+func enumerateVfioDevices(ctx context.Context, root string) ([]resourceapi.Device, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", root, err)
@@ -75,10 +82,16 @@ func enumerateVfioDevices(root string) ([]resourceapi.Device, error) {
 			continue
 		}
 
+		name := vfioDeviceName(busID)
+
 		group, err := deviceIOMMUGroupFromSysfs(devPath)
 		if err != nil {
-			// A vfio device without an IOMMU group cannot be passed
-			// through, so it must not be advertised.
+			// A vfio device without an IOMMU group cannot be passed through,
+			// so it must not be advertised. Silently dropping it would leave a
+			// VM Pending with no record naming the card it wanted.
+			logging.FromContext(ctx).Warn("Skipping vfio-pci NPU without an IOMMU group",
+				"device", name, "pciBusID", busID, "err", err,
+				"impact", "device is not published for passthrough; check that the IOMMU is enabled")
 			continue
 		}
 
@@ -102,22 +115,17 @@ func enumerateVfioDevices(root string) ([]resourceapi.Device, error) {
 			}
 		}
 
-		if pcieRoot, err := resolvePCIERootID(root, busID); err == nil && pcieRoot != "" {
-			attrs[pcieRootAttributeKey] = resourceapi.DeviceAttribute{StringValue: ptr.To(pcieRoot)}
-		}
+		setPCIERootAttr(ctx, attrs, name, root, busID)
 
 		if numa, err := readSysfsValue(devPath, "numa_node"); err == nil {
-			if v, err := strconv.ParseInt(numa, 10, 64); err == nil && v >= 0 {
-				attrs[numaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
-				attrs[dranetNumaNodeAttributeKey] = resourceapi.DeviceAttribute{IntValue: ptr.To(v)}
-			}
+			setNumaNodeAttr(ctx, attrs, name, numa)
 		}
 
 		_, err = os.Lstat(filepath.Join(devPath, "physfn"))
 		attrs["vf"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(err == nil)}
 
 		devices = append(devices, resourceapi.Device{
-			Name:       vfioDeviceName(busID),
+			Name:       name,
 			Attributes: attrs,
 		})
 	}
@@ -154,7 +162,7 @@ func deviceIOMMUGroup(device resourceapi.Device) (string, error) {
 	return strconv.FormatInt(*attr.IntValue, 10), nil
 }
 
-func vfioContainerEdits(device resourceapi.Device, metadataDirs []string) (*cdispec.ContainerEdits, error) {
+func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadataDirs []string) (*cdispec.ContainerEdits, error) {
 	group, err := deviceIOMMUGroup(device)
 	if err != nil {
 		return nil, err
@@ -162,7 +170,7 @@ func vfioContainerEdits(device resourceapi.Device, metadataDirs []string) (*cdis
 
 	edits := &cdispec.ContainerEdits{}
 	for _, path := range []string{vfioContainerDevPath, filepath.Join(vfioDevDir, group)} {
-		if _, err := waitForDeviceNode(path); err != nil {
+		if _, err := waitForDeviceNode(ctx, path); err != nil {
 			return nil, fmt.Errorf("vfio device node %q: %w", path, err)
 		}
 		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{

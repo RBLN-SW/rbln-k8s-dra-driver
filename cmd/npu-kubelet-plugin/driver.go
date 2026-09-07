@@ -22,12 +22,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
-	"k8s.io/klog/v2"
 )
 
 type driver struct {
@@ -73,6 +73,20 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 
+	// The last startup record, and the one that says the plugin is serving:
+	// enumeration, kubelet registration, the healthcheck and the publish
+	// request all succeeded. PublishResources does not block and the apiserver
+	// rejects invalid slices asynchronously, so this claims the driver is up,
+	// not that the ResourceSlice exists yet — a rejected write arrives later
+	// through HandleError.
+	logging.FromContext(ctx).Info("Driver started",
+		"driverName", config.flags.driverName, "pool", config.flags.nodeName,
+		"deviceCount", len(state.allocatable),
+		"npuDeviceCount", len(state.npuDevices), "vfioDeviceCount", len(state.vfioDevices),
+		"vfioRescanInterval", config.flags.vfioRescanInterval.String())
+
+	// Started after the startup record so the counts above are read before the
+	// rescan loop can start rewriting them.
 	if interval := config.flags.vfioRescanInterval; interval > 0 {
 		go driver.runVfioRescan(ctx, interval)
 	}
@@ -80,8 +94,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	return driver, nil
 }
 
+// runVfioRescan republishes the ResourceSlice whenever the set of vfio-pci
+// bound NPUs changes. Only vfio devices are rescanned (see
+// DeviceState.RescanVfioDevices); a failed scan is retried on the next tick.
 func (d *driver) runVfioRescan(ctx context.Context, interval time.Duration) {
-	logger := klog.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -93,32 +110,39 @@ func (d *driver) runVfioRescan(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 		}
 
-		resources, changed, err := d.state.RescanVfioDevices()
+		resources, changed, err := d.state.RescanVfioDevices(ctx)
 		if err != nil {
-			logger.Error(err, "Unable to rescan vfio-pci NPU devices")
+			logger.Error("Failed to rescan vfio-pci NPU devices", "err", err,
+				"impact", "published passthrough devices may be stale until the next rescan succeeds")
 			continue
 		}
 		if !changed {
 			continue
 		}
 
-		logger.Info("vfio-pci NPU devices changed, republishing resources")
 		if err := d.helper.PublishResources(ctx, resources); err != nil {
-			logger.Error(err, "Unable to publish resources after vfio rescan")
+			logger.Error("Failed to publish resources after vfio-pci rescan", "err", err,
+				"impact", "the ResourceSlice does not reflect the current passthrough devices")
 		}
 	}
 }
 
-func (d *driver) Shutdown(logger klog.Logger) error {
+func (d *driver) Shutdown() error {
 	if d.healthcheck != nil {
-		d.healthcheck.Stop(logger)
+		d.healthcheck.Stop()
 	}
 	d.helper.Stop()
 	return nil
 }
 
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
-	klog.Infof("PrepareResourceClaims is called: number of claims: %d", len(claims))
+	// The liveness probe drives this RPC with an empty claim list once per
+	// probe period (health.go), and the helper forwards it here unconditionally.
+	// Logging those at info would drown real kubelet traffic in records that
+	// look exactly like it.
+	if len(claims) > 0 {
+		logging.FromContext(ctx).Info("Received request to prepare resource claims", "count", len(claims))
+	}
 	result := make(map[types.UID]kubeletplugin.PrepareResult)
 
 	for _, claim := range claims {
@@ -128,9 +152,19 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 	return result, nil
 }
 
-func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
-	preparedPBs, err := d.state.Prepare(claim)
+func (d *driver) prepareResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	// Identify the claim the way an operator holds it — they start from a
+	// pending pod, not a UID — and let everything downstream inherit it.
+	ctx = logging.WithValues(ctx, "claimUID", string(claim.UID),
+		"claimNamespace", claim.Namespace, "claimName", claim.Name)
+	logger := logging.FromContext(ctx)
+
+	preparedPBs, err := d.state.Prepare(ctx, claim)
 	if err != nil {
+		// Logged here as well as returned: kubelet surfaces the error on the
+		// pod, but an operator reading only the driver's log would otherwise
+		// see nothing at all for a claim that never becomes ready.
+		logger.Error("Failed to prepare devices for claim", "err", err)
 		return kubeletplugin.PrepareResult{
 			Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
 		}
@@ -145,12 +179,20 @@ func (d *driver) prepareResourceClaim(_ context.Context, claim *resourceapi.Reso
 		})
 	}
 
-	klog.Infof("Returning newly prepared devices for claim '%v': %v", claim.UID, prepared)
+	deviceNames := make([]string, 0, len(prepared))
+	for _, p := range prepared {
+		deviceNames = append(deviceNames, p.DeviceName)
+	}
+	logger.Info("Prepared devices for claim", "devices", deviceNames)
+	logger.Debug("Prepared device details", "devices", prepared)
 	return kubeletplugin.PrepareResult{Devices: prepared}
 }
 
 func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
-	klog.Infof("UnprepareResourceClaims is called: number of claims: %d", len(claims))
+	// Guarded for the same reason as prepare, so the two stay symmetric.
+	if len(claims) > 0 {
+		logging.FromContext(ctx).Info("Received request to unprepare resource claims", "count", len(claims))
+	}
 	result := make(map[types.UID]error)
 
 	for _, claim := range claims {
@@ -160,8 +202,14 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claims []kubeletpl
 	return result, nil
 }
 
-func (d *driver) unprepareResourceClaim(_ context.Context, claim kubeletplugin.NamespacedObject) error {
-	if err := d.state.Unprepare(string(claim.UID)); err != nil {
+func (d *driver) unprepareResourceClaim(ctx context.Context, claim kubeletplugin.NamespacedObject) error {
+	ctx = logging.WithValues(ctx, "claimUID", string(claim.UID),
+		"claimNamespace", claim.Namespace, "claimName", claim.Name)
+
+	if err := d.state.Unprepare(ctx, string(claim.UID)); err != nil {
+		// Same reasoning as prepare: a leaked device node is invisible to an
+		// operator who only has the driver's log.
+		logging.FromContext(ctx).Error("Failed to unprepare devices for claim", "err", err)
 		return fmt.Errorf("error unpreparing devices for claim %v: %w", claim.UID, err)
 	}
 

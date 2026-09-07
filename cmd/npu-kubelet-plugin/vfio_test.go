@@ -17,12 +17,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/utils/ptr"
+
+	"github.com/RBLN-SW/k8s-dra-driver-npu/internal/logtest"
 )
 
 type fakePCIDevice struct {
@@ -124,7 +127,7 @@ func TestEnumerateVfioDevices(t *testing.T) {
 	dev := rblnVfioDevice("0000:27:00.0")
 	root := writeFakeSysfs(t, []fakePCIDevice{dev})
 
-	devices, err := enumerateVfioDevices(root)
+	devices, err := enumerateVfioDevices(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +199,7 @@ func TestEnumerateVfioDevicesFiltering(t *testing.T) {
 
 	root := writeFakeSysfs(t, []fakePCIDevice{rblnBound, otherVendor, otherClass, unbound, noIOMMU, wanted})
 
-	devices, err := enumerateVfioDevices(root)
+	devices, err := enumerateVfioDevices(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +216,7 @@ func TestEnumerateVfioDevicesVirtualFunction(t *testing.T) {
 	vf.physfn = true
 	root := writeFakeSysfs(t, []fakePCIDevice{vf})
 
-	devices, err := enumerateVfioDevices(root)
+	devices, err := enumerateVfioDevices(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +249,7 @@ func TestRescanVfioDevices(t *testing.T) {
 		t.Fatalf("expected only the npu device before rescan, got %d", len(state.allocatable))
 	}
 
-	resources, changed, err := state.RescanVfioDevices()
+	resources, changed, err := state.RescanVfioDevices(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +269,7 @@ func TestRescanVfioDevices(t *testing.T) {
 		t.Errorf("expected 2 devices in published slice, got %d", got)
 	}
 
-	_, changed, err = state.RescanVfioDevices()
+	_, changed, err = state.RescanVfioDevices(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,5 +310,76 @@ func TestIsVfioDeviceAndIOMMUGroup(t *testing.T) {
 
 	if _, err := deviceIOMMUGroup(npu); err == nil {
 		t.Error("expected error for device without iommu group")
+	}
+}
+
+// A vfio-pci bound NPU without an IOMMU group cannot be passed through and is
+// not advertised. Dropping it silently would leave a VM Pending with no record
+// naming the card, so the skip has to be a warn that names the device.
+func TestEnumerateVfioDevicesWarnsOnMissingIOMMUGroup(t *testing.T) {
+	buf := logtest.Capture(t, "info")
+
+	noIOMMU := rblnVfioDevice("0000:2b:00.0")
+	noIOMMU.iommuGroup = ""
+	root := writeFakeSysfs(t, []fakePCIDevice{noIOMMU})
+
+	devices, err := enumerateVfioDevices(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 0 {
+		t.Fatalf("device without IOMMU group was advertised: %v", devices)
+	}
+
+	line := logtest.Find(logtest.Lines(t, buf), "Skipping vfio-pci NPU without an IOMMU group")
+	if line == nil {
+		t.Fatalf("skipped device was not reported: %s", buf.String())
+	}
+	if line["level"] != "warn" {
+		t.Errorf("level = %v, want warn", line["level"])
+	}
+	if line["pciBusID"] != "0000:2b:00.0" {
+		t.Errorf("pciBusID = %v, want 0000:2b:00.0", line["pciBusID"])
+	}
+	if line["impact"] == nil {
+		t.Error("impact missing: the record must say the device is not published")
+	}
+}
+
+// The rescan ticker gives no other hint of when a passthrough device appeared
+// or vanished, so the change record has to name the delta.
+func TestRescanVfioDevicesLogsDelta(t *testing.T) {
+	buf := logtest.Capture(t, "info")
+	root := writeFakeSysfs(t, []fakePCIDevice{rblnVfioDevice("0000:27:00.0")})
+
+	state := &DeviceState{nodeName: "node-1", sysfsPCIDevicesRoot: root}
+	state.rebuildResources()
+
+	if _, changed, err := state.RescanVfioDevices(context.Background()); err != nil || !changed {
+		t.Fatalf("first rescan: changed=%v err=%v", changed, err)
+	}
+
+	line := logtest.Find(logtest.Lines(t, buf), "vfio-pci NPU devices changed, republishing resources")
+	if line == nil {
+		t.Fatalf("device change was not logged: %s", buf.String())
+	}
+	added, ok := line["added"].([]any)
+	if !ok || len(added) != 1 || added[0] != "vfio-0000-27-00-0" {
+		t.Errorf("added = %#v, want [vfio-0000-27-00-0]", line["added"])
+	}
+	if removed, ok := line["removed"].([]any); !ok || len(removed) != 0 {
+		t.Errorf("removed = %#v, want an empty list", line["removed"])
+	}
+	if line["vfioDeviceCount"] != float64(1) {
+		t.Errorf("vfioDeviceCount = %v, want 1", line["vfioDeviceCount"])
+	}
+
+	// An unchanged scan must stay silent: the loop runs every 30s.
+	buf.Reset()
+	if _, changed, err := state.RescanVfioDevices(context.Background()); err != nil || changed {
+		t.Fatalf("second rescan: changed=%v err=%v", changed, err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unchanged rescan produced records: %s", buf.String())
 	}
 }

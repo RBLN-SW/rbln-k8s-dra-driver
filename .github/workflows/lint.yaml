@@ -24,3 +24,32 @@ jobs:
         version: latest
         args: -v --timeout 5m
         skip-cache: true
+    - name: Ensure a C compiler for -race
+      # -race requires cgo, and Go disables cgo outright when it finds no C
+      # compiler — which is the default on a minimal runner image. The compiler
+      # is installed here rather than letting the test step fall back to a
+      # raceless run: the logging tests mutate process-global state
+      # (slog.Default, klog) and -shuffle=on reorders them, so silently
+      # dropping the detector would retire the gate exactly where it earns its
+      # keep. No compiler means a failed job, not quiet coverage loss.
+      run: |
+        if command -v "$(go env CC)" >/dev/null 2>&1; then
+          exit 0
+        fi
+        if ! command -v apt-get >/dev/null 2>&1; then
+          echo "::error title=No C compiler::$(go env CC) is missing and apt-get is unavailable; add a C compiler to the runner image so -race can run"
+          exit 1
+        fi
+        # ARC runner images commonly run as root without a sudo binary.
+        sudo=""
+        if [ "$(id -u)" != 0 ]; then
+          sudo="sudo"
+        fi
+        $sudo apt-get update -qq
+        $sudo apt-get install -y -qq gcc
+    - name: Unit tests
+      # Set explicitly: a runner that exports CGO_ENABLED=0 would disable the
+      # detector even with a compiler installed.
+      env:
+        CGO_ENABLED: 1
+      run: go test -race -shuffle=on ./...

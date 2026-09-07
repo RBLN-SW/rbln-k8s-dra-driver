@@ -13,6 +13,7 @@ permissions:
   contents: read
   pull-requests: write
   statuses: write
+  security-events: write # image-scan.yaml uploads SARIF to code scanning
 
 jobs:
   pr-title-validation:
@@ -58,3 +59,13 @@ jobs:
     secrets:
       registry_id: ${{ secrets.HARBOR_USERNAME }}
       registry_password: ${{ secrets.HARBOR_PASSWORD }}
+  # Runs alongside image-build-push rather than gating it: blocking the push
+  # would serialize two full image builds and make Buildkite's e2e wait on this
+  # one. A vulnerable image can still reach Harbor under its commit-SHA tag, but
+  # the PR stays red, so it cannot merge.
+  image-scan:
+    needs: [lint, manifests-check]
+    uses: ./.github/workflows/image-scan.yaml
+    secrets: inherit
+    with:
+      fail-on-findings: true
