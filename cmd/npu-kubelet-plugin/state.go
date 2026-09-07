@@ -231,11 +231,20 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		}
 	}
 
+	rdsNodes, err := s.cdi.getRDSDeviceNodes()
+	if err != nil {
+		logger.Warn("Reading RDS CDI spec failed, continuing without RDS", "err", err)
+	}
+
 	var preparedDevices PreparedDevices
-	for _, result := range results {
+	for i, result := range results {
 		edits, err := s.applyConfig(ctx, result.Device, hostRsdPath)
 		if err != nil {
 			return nil, err
+		}
+		// RDS is a claim-scoped shared device (like /dev/rsd0); inject it once.
+		if i == 0 {
+			edits.DeviceNodes = append(edits.DeviceNodes, rdsNodes...)
 		}
 		device := &PreparedDevice{
 			Device: drapbv1.Device{
