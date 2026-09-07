@@ -146,3 +146,73 @@ func TestEnumerationWarnsOnUnparseableNumaNode(t *testing.T) {
 		t.Errorf("device/numaNode = %v/%v", line["device"], line["numaNode"])
 	}
 }
+
+// sysfs reports numa_node=-1 for a device with no NUMA affinity. Publishing
+// -1 would make the attribute match nothing, so it must be omitted; a real
+// node is mirrored under the DraNet key so one claim can matchAttribute NPUs
+// against NICs and CPUs published by other drivers.
+func TestSetNumaNodeAttrOmitsNegativeAndMirrorsDraNetKey(t *testing.T) {
+	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{}
+
+	setNumaNodeAttr(context.Background(), attrs, "rbln0", "-1")
+	if len(attrs) != 0 {
+		t.Errorf("attrs = %v, want none for numa_node=-1", attrs)
+	}
+
+	setNumaNodeAttr(context.Background(), attrs, "rbln0", "1")
+	for _, key := range []resourceapi.QualifiedName{numaNodeAttributeKey, dranetNumaNodeAttributeKey} {
+		attr, ok := attrs[key]
+		if !ok || attr.IntValue == nil || *attr.IntValue != 1 {
+			t.Errorf("%s = %v, want IntValue 1", key, attr.IntValue)
+		}
+	}
+}
+
+// A pcieRoot that cannot be resolved from sysfs silently dropped the
+// attribute, and cross-driver matchAttribute against DraNet NICs then never
+// matched with nothing in the log to explain why.
+func TestSetPCIERootAttrWarnsWhenUnresolvable(t *testing.T) {
+	buf := logtest.Capture(t, "info")
+	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{}
+
+	if got := setPCIERootAttr(context.Background(), attrs, "rbln0", t.TempDir(), "0000:4d:00.0"); got != "" {
+		t.Errorf("pcieRoot = %q, want empty for a device missing from sysfs", got)
+	}
+	if _, ok := attrs[pcieRootAttributeKey]; ok {
+		t.Error("pcieRoot attribute must not be set when it cannot be resolved")
+	}
+
+	line := logtest.Find(logtest.Lines(t, buf), "Ignoring unresolvable PCIe root")
+	if line == nil {
+		t.Fatalf("unresolvable PCIe root was not reported: %s", buf.String())
+	}
+	if line["level"] != "warn" {
+		t.Errorf("level = %v, want warn", line["level"])
+	}
+	if line["device"] != "rbln0" || line["pciBusID"] != "0000:4d:00.0" {
+		t.Errorf("device/pciBusID = %v/%v", line["device"], line["pciBusID"])
+	}
+	if line["impact"] == nil {
+		t.Error("impact missing: the record must say the device lost its pcieRoot attribute")
+	}
+}
+
+func TestDeviceNameDelta(t *testing.T) {
+	dev := func(name string) resourceapi.Device { return resourceapi.Device{Name: name} }
+	prev := []resourceapi.Device{dev("a"), dev("b")}
+	next := []resourceapi.Device{dev("b"), dev("c")}
+
+	added, removed := deviceNameDelta(prev, next)
+	if len(added) != 1 || added[0] != "c" {
+		t.Errorf("added = %v, want [c]", added)
+	}
+	if len(removed) != 1 || removed[0] != "a" {
+		t.Errorf("removed = %v, want [a]", removed)
+	}
+
+	// Empty, not nil: the record should read "added":[] rather than null.
+	added, removed = deviceNameDelta(nil, nil)
+	if added == nil || removed == nil || len(added) != 0 || len(removed) != 0 {
+		t.Errorf("delta of nothing = %v/%v, want two empty slices", added, removed)
+	}
+}

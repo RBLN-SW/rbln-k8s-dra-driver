@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	resourceapi "k8s.io/api/resource/v1"
@@ -68,7 +69,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
 
-	if err := helper.PublishResources(ctx, state.driverResources); err != nil {
+	if err := helper.PublishResources(ctx, state.DriverResources()); err != nil {
 		return nil, err
 	}
 
@@ -80,9 +81,50 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// through HandleError.
 	logging.FromContext(ctx).Info("Driver started",
 		"driverName", config.flags.driverName, "pool", config.flags.nodeName,
-		"deviceCount", len(state.allocatable))
+		"deviceCount", len(state.allocatable),
+		"npuDeviceCount", len(state.npuDevices), "vfioDeviceCount", len(state.vfioDevices),
+		"vfioRescanInterval", config.flags.vfioRescanInterval.String())
+
+	// Started after the startup record so the counts above are read before the
+	// rescan loop can start rewriting them.
+	if interval := config.flags.vfioRescanInterval; interval > 0 {
+		go driver.runVfioRescan(ctx, interval)
+	}
 
 	return driver, nil
+}
+
+// runVfioRescan republishes the ResourceSlice whenever the set of vfio-pci
+// bound NPUs changes. Only vfio devices are rescanned (see
+// DeviceState.RescanVfioDevices); a failed scan is retried on the next tick.
+func (d *driver) runVfioRescan(ctx context.Context, interval time.Duration) {
+	logger := logging.FromContext(ctx)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		resources, changed, err := d.state.RescanVfioDevices(ctx)
+		if err != nil {
+			logger.Error("Failed to rescan vfio-pci NPU devices", "err", err,
+				"impact", "published passthrough devices may be stale until the next rescan succeeds")
+			continue
+		}
+		if !changed {
+			continue
+		}
+
+		if err := d.helper.PublishResources(ctx, resources); err != nil {
+			logger.Error("Failed to publish resources after vfio-pci rescan", "err", err,
+				"impact", "the ResourceSlice does not reflect the current passthrough devices")
+		}
+	}
 }
 
 func (d *driver) Shutdown() error {

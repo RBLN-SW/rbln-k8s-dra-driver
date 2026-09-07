@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
@@ -206,4 +207,29 @@ func TestGetRDSDeviceNodes(t *testing.T) {
 			t.Fatalf("expected nil nodes on a host with no RDS spec, got %+v", nodes)
 		}
 	})
+}
+
+// vfio claims must not reference the common CDI device: it carries the RBLN
+// runtime's UMD mounts and hooks, which a passthrough-only node does not have
+// and a virt-launcher container must not receive.
+func TestGetClaimDevicesIncludesCommonOnlyForNpu(t *testing.T) {
+	cdi, err := NewCDIHandler(t.TempDir(), consts.DriverName, "npu")
+	if err != nil {
+		t.Fatalf("CDI handler: %v", err)
+	}
+
+	npu := cdi.GetClaimDevices("claim-uid", []string{"rbln0"}, true)
+	if len(npu) != 2 || !strings.HasSuffix(npu[0], "="+cdiCommonDeviceName) {
+		t.Errorf("npu claim devices = %v, want the common device first", npu)
+	}
+
+	vfio := cdi.GetClaimDevices("claim-uid", []string{"vfio-0000-27-00-0"}, false)
+	if len(vfio) != 1 {
+		t.Errorf("vfio claim devices = %v, want only the per-claim device", vfio)
+	}
+	for _, id := range vfio {
+		if strings.Contains(id, "="+cdiCommonDeviceName) {
+			t.Errorf("vfio claim devices = %v must not include the common device", vfio)
+		}
+	}
 }

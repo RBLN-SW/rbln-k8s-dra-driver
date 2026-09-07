@@ -6,5 +6,5 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: 'device.driver == {{ include "k8s-dra-driver-npu.driverName" . | quote }}'
+      expression: 'device.driver == {{ include "k8s-dra-driver-npu.driverName" . | quote }} && device.attributes[{{ include "k8s-dra-driver-npu.driverName" . | quote }}].type == "npu"'
   extendedResourceName: rebellions.ai/npu

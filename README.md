@@ -7,7 +7,9 @@ This repository implements a Kubernetes [Dynamic Resource Allocation (DRA)](http
 ### Prerequisites
 
 - Kubernetes v1.34 or later (not tested on older versions)
-- [RBLN NPU Operator](https://github.com/RBLN-SW/rbln-npu-operator) v0.2.1 or later (with containerToolkit enabled)
+- [RBLN NPU Operator](https://github.com/RBLN-SW/rbln-npu-operator) v0.2.1 or
+  later (VM passthrough requires an operator version with DRA vfio
+  passthrough support)
 - CDI must be enabled in the container runtime
 
 ### Install with Helm
@@ -17,6 +19,10 @@ helm repo add rebellions https://rbln-sw.github.io/charts/
 helm repo update
 helm install k8s-dra-driver-npu rebellions/k8s-dra-driver-npu
 ```
+
+The NPU operator can also deploy this driver itself
+(`draKubeletPlugin.enabled: true` in the `RBLNClusterPolicy`); in that case
+do not install this chart separately.
 
 ## Logging
 
@@ -86,13 +92,17 @@ stamped from the release tag. A plain `make cmds` with no `VERSION` reports
 | Symptom | Look for |
 |---|---|
 | Plugin may not have come up | `Driver started` is the last startup record; without it the plugin never finished registering |
-| Pods stay `Pending`, no devices offered | `No NPU devices found on this node` (warn), or the `Driver started` `deviceCount` |
+| Pods stay `Pending`, no devices offered | `No NPU devices found on this node` (warn), or the `Driver started` `deviceCount` (`npuDeviceCount` / `vfioDeviceCount` split it by kind) |
+| VMs stay `Pending`, no passthrough device offered | `Failed to enumerate vfio-pci NPU devices` (error) or `Skipping vfio-pci NPU without an IOMMU group` (warn); a passthrough-only node also reports `rbln-smi enumeration unavailable, continuing with vfio-pci devices only` |
+| Passthrough devices came or went without a restart | `vfio-pci NPU devices changed, republishing resources` with `added` / `removed`, or `Failed to rescan vfio-pci NPU devices` (error) |
 | Pod stuck in `ContainerCreating` | `Failed to prepare devices for claim` (error) with `err` and the claim keys |
 | Multi-NPU job runs but peers cannot talk | `RSD group creation returned no device path` (error) — the pod is Ready but degraded |
 | Container cannot see `/dev/rsd0` or the NPU | `Wrote CDI spec for claim` at `debug`, which lists the injected `deviceNodes` |
 | Container cannot find the userspace library | `Wrote common CDI spec with runtime edits` at `debug`, with `mounts`/`hooks` counts |
 | Devices seem leaked after a pod is gone | `Unprepared devices for claim`, or `No prepared state for claim` at `debug` |
-| Topology-aware allocation behaves oddly | `Ignoring unparseable NUMA node` (warn) |
+| Topology-aware allocation behaves oddly | `Ignoring unparseable NUMA node` (warn), `Device reports no NUMA affinity` at `debug` |
+| Cross-driver `matchAttribute` on `pcieRoot` never matches | `Ignoring unresolvable PCIe root` (warn); the attribute is resolved from sysfs, so check `/sys` is visible to the plugin |
+| A VM's claim fails with "metadata directory ... is owned by claim" | Another live claim with the same name holds the KubeVirt metadata directory; `Failed to roll back KubeVirt device metadata` (warn) explains a leftover from an earlier failed prepare |
 
 ## Usage Examples
 

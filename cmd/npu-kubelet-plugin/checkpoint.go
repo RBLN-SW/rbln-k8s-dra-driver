@@ -11,6 +11,11 @@ type Checkpoint struct {
 	V1       *CheckpointV1     `json:"v1,omitempty"`
 }
 
+// CheckpointV1 must keep exactly this field set: the checksum is computed
+// over the marshaled struct, so adding a field breaks checksum verification
+// for the version being rolled back to. KubeVirt metadata cleanup
+// deliberately does NOT live here — Unprepare discovers the directories to
+// remove by scanning the on-disk owner markers instead (kubevirt_metadata.go).
 type CheckpointV1 struct {
 	PreparedClaims PreparedClaims `json:"preparedClaims,omitempty"`
 }

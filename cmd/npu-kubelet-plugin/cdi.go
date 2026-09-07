@@ -269,9 +269,10 @@ func (cdi *CDIHandler) DeleteClaimSpecFile(ctx context.Context, claimUID string)
 	return nil
 }
 
-func (cdi *CDIHandler) GetClaimDevices(claimUID string, devices []string) []string {
-	cdiDevices := []string{
-		cdiparser.QualifiedName(cdi.vendor(), cdi.class, cdiCommonDeviceName),
+func (cdi *CDIHandler) GetClaimDevices(claimUID string, devices []string, includeCommon bool) []string {
+	var cdiDevices []string
+	if includeCommon {
+		cdiDevices = append(cdiDevices, cdiparser.QualifiedName(cdi.vendor(), cdi.class, cdiCommonDeviceName))
 	}
 
 	for _, device := range devices {

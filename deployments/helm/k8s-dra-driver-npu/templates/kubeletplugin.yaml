@@ -97,6 +97,8 @@ spec:
         - name: host-usr-bin
           mountPath: /host/usr/bin
           readOnly: true
+        - name: kubevirt-dra-metadata
+          mountPath: /var/run/kubernetes.io/dra-device-attributes
       volumes:
       - name: plugins-registry
         hostPath:
@@ -116,6 +118,10 @@ spec:
       - name: host-usr-bin
         hostPath:
           path: /usr/bin
+      - name: kubevirt-dra-metadata
+        hostPath:
+          path: /var/run/kubernetes.io/dra-device-attributes
+          type: DirectoryOrCreate
       {{- with .Values.kubeletPlugin.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
