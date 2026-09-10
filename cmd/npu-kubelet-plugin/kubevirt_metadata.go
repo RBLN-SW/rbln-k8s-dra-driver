@@ -28,8 +28,8 @@ import (
 //	Template claims: {base}/resourceclaimtemplates/{podClaimName}/{request}/{driver}-metadata.json
 //	Direct claims:   {base}/resourceclaims/{claimName}/{request}/{driver}-metadata.json
 //
-// The directory is not mounted into virt-launcher by KubeVirt either; the
-// prepare path injects a read-only CDI mount of the base directory alongside
+// The files are not mounted into virt-launcher by KubeVirt either; the
+// prepare path injects a read-only CDI mount of each metadata file alongside
 // the vfio device nodes.
 const (
 	kubevirtMetadataBasePath    = "/var/run/kubernetes.io/dra-device-attributes"
@@ -86,6 +86,28 @@ func kubevirtMetadataClaimDirs(basePath string, claim *resourceapi.ResourceClaim
 	return dirs
 }
 
+// A firstAvailable subrequest is reported as "<mainRequest>/<subRequest>", but
+// virt-launcher globs the directory named after the main request it knows
+// from the VMI.
+func kubevirtMetadataRequestName(result *resourceapi.DeviceRequestAllocationResult) string {
+	requestName, _, _ := strings.Cut(result.Request, "/")
+	return requestName
+}
+
+func kubevirtMetadataFilePath(claimDir, requestName, driverName string) string {
+	return filepath.Join(claimDir, requestName, driverName+"-metadata.json")
+}
+
+// kubevirtMetadataFiles returns the files writeKubeVirtMetadata publishes for
+// requestName, one per layout; the prepare path bind-mounts exactly these.
+func kubevirtMetadataFiles(basePath string, claim *resourceapi.ResourceClaim, driverName, requestName string) []string {
+	var files []string
+	for _, claimDir := range kubevirtMetadataClaimDirs(basePath, claim) {
+		files = append(files, kubevirtMetadataFilePath(claimDir, requestName, driverName))
+	}
+	return files
+}
+
 func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, driverName string, allocatable AllocatableDevices) error {
 	var podClaimName *string
 	if v, ok := claim.Annotations[podClaimNameAnnotation]; ok && v != "" {
@@ -102,10 +124,7 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 		if !ok {
 			continue
 		}
-		// A firstAvailable subrequest is reported as
-		// "<mainRequest>/<subRequest>", but virt-launcher globs the
-		// directory named after the main request it knows from the VMI.
-		requestName, _, _ := strings.Cut(result.Request, "/")
+		requestName := kubevirtMetadataRequestName(result)
 		devicesByRequest[requestName] = append(devicesByRequest[requestName], kubevirtMetadataDevice{
 			Driver:     driverName,
 			Pool:       result.Pool,
@@ -123,7 +142,8 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 			return err
 		}
 		for requestName, devices := range devicesByRequest {
-			dir := filepath.Join(claimDir, requestName)
+			path := kubevirtMetadataFilePath(claimDir, requestName, driverName)
+			dir := filepath.Dir(path)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return fmt.Errorf("create metadata dir %s: %w", dir, err)
 			}
@@ -141,7 +161,6 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 				return fmt.Errorf("marshal metadata for request %s: %w", requestName, err)
 			}
 
-			path := filepath.Join(dir, driverName+"-metadata.json")
 			tmp := path + ".tmp"
 			if err := os.WriteFile(tmp, data, 0o644); err != nil {
 				return fmt.Errorf("write metadata %s: %w", tmp, err)

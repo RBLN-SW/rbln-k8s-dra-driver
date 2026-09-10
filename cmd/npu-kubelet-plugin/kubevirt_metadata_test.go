@@ -190,3 +190,56 @@ func TestKubeVirtMetadataOwnership(t *testing.T) {
 		t.Fatalf("idempotent rewrite for claim A failed: %v", err)
 	}
 }
+
+// The mount sources must be exactly the regular files writeKubeVirtMetadata
+// wrote, one per layout, never a directory.
+func TestKubeVirtMetadataFilesAreTheWrittenFiles(t *testing.T) {
+	for name, tc := range map[string]struct {
+		annotations map[string]string
+		request     string
+		wantFiles   int
+	}{
+		"template claim, both layouts": {
+			annotations: map[string]string{podClaimNameAnnotation: "npu-claim"},
+			request:     "npu",
+			wantFiles:   2,
+		},
+		"firstAvailable subrequest maps to the main request": {
+			annotations: map[string]string{podClaimNameAnnotation: "npu-claim"},
+			request:     "npu/ca25",
+			wantFiles:   2,
+		},
+		"direct claim, claim-name layout only": {
+			annotations: nil,
+			request:     "npu",
+			wantFiles:   1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			claim := testClaim(tc.annotations)
+			claim.Status.Allocation.Devices.Results[0].Request = tc.request
+			if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+				t.Fatalf("writeKubeVirtMetadata: %v", err)
+			}
+
+			result := &claim.Status.Allocation.Devices.Results[0]
+			files := kubevirtMetadataFiles(base, claim, "npu.rebellions.ai", kubevirtMetadataRequestName(result))
+			if len(files) != tc.wantFiles {
+				t.Fatalf("kubevirtMetadataFiles = %v, want %d entries", files, tc.wantFiles)
+			}
+			for _, file := range files {
+				fi, err := os.Stat(file)
+				if err != nil {
+					t.Fatalf("mount source %s was not written: %v", file, err)
+				}
+				if !fi.Mode().IsRegular() {
+					t.Fatalf("mount source %s is not a regular file (mode %v)", file, fi.Mode())
+				}
+				if filepath.Base(filepath.Dir(file)) != "npu" {
+					t.Fatalf("mount source %s is not under the main-request directory", file)
+				}
+			}
+		})
+	}
+}
