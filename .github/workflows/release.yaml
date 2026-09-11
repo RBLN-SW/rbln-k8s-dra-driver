@@ -31,8 +31,8 @@ jobs:
     secrets: inherit
 
   # Hand the rc to the obedients dra scenario (.buildkite/pipeline.yml in release
-  # mode) once the kit has published it. The build's verdict lands as the
-  # `rc-validation` commit status on the rc commit, which the kit reads before GA
+  # mode) once the kit has published it. rc-validation-status.yaml mirrors the
+  # build's verdict into the `rc-validation` commit status the kit reads before GA
   # (enforced once CLOUD_COMPONENT_RC_VALIDATION_ENFORCE is "true"). obedients is
   # reachable only from the in-network runner.
   rc-validate:
