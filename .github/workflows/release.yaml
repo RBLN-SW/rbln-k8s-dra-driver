@@ -29,3 +29,36 @@ jobs:
       # '.image.registry = env(HARBOR_HOST)'.
       chart_rc_values: '.image.repository = strenv(HARBOR_REGISTRY) + "/k8s-dra-driver-npu"'
     secrets: inherit
+
+  # Hand the rc to the obedients dra scenario (.buildkite/pipeline.yml in release
+  # mode) once the kit has published it. The build's verdict lands as the
+  # `rc-validation` commit status on the rc commit, which the kit reads before GA
+  # (enforced once CLOUD_COMPONENT_RC_VALIDATION_ENFORCE is "true"). obedients is
+  # reachable only from the in-network runner.
+  rc-validate:
+    name: rc validation (obedients dra scenario)
+    needs: release
+    if: needs.release.outputs.kind == 'rc'
+    runs-on: rbln-sw-k8s-general
+    steps:
+      - name: Install jq
+        run: command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+      - name: Trigger the validation build
+        env:
+          # Webhook trigger of the PR pipeline; the URL is the credential, so it
+          # lives in a secret. obedients applies the body's commit/branch/env.
+          TRIGGER_URL: ${{ secrets.OBEDIENTS_VALIDATE_TRIGGER_URL }}
+          SHA: ${{ needs.release.outputs.sha }}
+          BRANCH: ${{ needs.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TRIGGER_URL" ]; then
+            echo "::notice::secret OBEDIENTS_VALIDATE_TRIGGER_URL is not set; skipping rc validation, no rc-validation status will be posted for $GITHUB_REF_NAME"
+            exit 0
+          fi
+          jq -n --arg sha "$SHA" --arg branch "$BRANCH" --arg tag "$GITHUB_REF_NAME" '{
+            commit: $sha, branch: $branch, message: ("rc-validation " + $tag),
+            env: { RELEASE_MODE: "true", DRA_IMAGE_TAG: $tag }
+          }' | curl -sSf -X POST -H 'Content-Type: application/json' -d @- "$TRIGGER_URL" > build.json
+          url=$(jq -r '.build.web_url // .web_url // ("build #" + ((.build.number // .number) | tostring))' build.json)
+          echo "rc-validation build for $GITHUB_REF_NAME: $url" | tee -a "$GITHUB_STEP_SUMMARY"
