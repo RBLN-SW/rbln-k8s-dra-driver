@@ -162,7 +162,7 @@ func deviceIOMMUGroup(device resourceapi.Device) (string, error) {
 	return strconv.FormatInt(*attr.IntValue, 10), nil
 }
 
-func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadataDirs []string) (*cdispec.ContainerEdits, error) {
+func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadataFiles []string) (*cdispec.ContainerEdits, error) {
 	group, err := deviceIOMMUGroup(device)
 	if err != nil {
 		return nil, err
@@ -183,16 +183,16 @@ func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadata
 	}
 	// virt-launcher resolves the passthrough PCI address from KEP-5304
 	// metadata files (see kubevirt_metadata.go). KubeVirt does not mount
-	// those directories itself, so expose them to the consuming container
-	// here. Only this claim's directories are mounted — the base path holds
+	// those files itself, so expose them to the consuming container
+	// here. Only this claim's files are mounted — the base path holds
 	// every claim's metadata on the node, which must not leak across
 	// tenants. The container paths must mirror the host paths because
 	// KubeVirt assembles the full {base}/{subdir}/{claim}/{request} path
 	// when globbing.
-	for _, dir := range metadataDirs {
+	for _, file := range metadataFiles {
 		edits.Mounts = append(edits.Mounts, &cdispec.Mount{
-			HostPath:      dir,
-			ContainerPath: dir,
+			HostPath:      file,
+			ContainerPath: file,
 			Options:       []string{"ro", "bind"},
 		})
 	}
