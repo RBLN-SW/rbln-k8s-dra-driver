@@ -98,9 +98,9 @@ jobs:
           # Only a status newer than the trigger counts: a re-run must not read
           # the previous build's verdict off the same commit.
           for _ in $(seq 1 170); do
-            # shellcheck disable=SC2016 # $since is a jq variable
+            # gh api has no --arg: the timestamp is interpolated into the jq program.
             state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/status" \
-              --jq --arg since "$TRIGGERED_AT" '.statuses[] | select(.context == "[DRA Driver] PR CI" and .updated_at > $since) | .state')
+              --jq ".statuses[] | select(.context == \"[DRA Driver] PR CI\" and .updated_at > \"$TRIGGERED_AT\") | .state")
             case "$state" in
               success) post success "obedients dra scenario passed on $GITHUB_REF_NAME"; exit 0 ;;
               failure|error) post failure "obedients dra scenario $state on $GITHUB_REF_NAME"; exit 1 ;;
