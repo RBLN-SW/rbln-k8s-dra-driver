@@ -291,7 +291,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 
 	// Write the metadata before the CDI spec: the spec bind-mounts the
-	// metadata directories, so it must not reference paths that failed to
+	// metadata files, so it must not reference paths that failed to
 	// materialize. Any later failure rolls the metadata back by claim UID
 	// (owner-marker scan) — metadata left behind by a failed Prepare would
 	// otherwise never be collected, because Unprepare no-ops for claims the
@@ -451,7 +451,9 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		}
 	}
 
-	metadataDirs := kubevirtMetadataClaimDirs(kubevirtMetadataBasePath, claim)
+	// Metadata is per request: mount its files once, on the request's first
+	// vfio device, instead of duplicating them on every device.
+	metadataMounted := map[string]bool{}
 
 	var preparedDevices PreparedDevices
 	rdsInjected := false
@@ -461,7 +463,12 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 
 		vfio := isVfioDevice(s.allocatable[result.Device])
 		if vfio {
-			edits, err = vfioContainerEdits(ctx, s.allocatable[result.Device], metadataDirs)
+			var metadataFiles []string
+			if requestName := kubevirtMetadataRequestName(result); !metadataMounted[requestName] {
+				metadataFiles = kubevirtMetadataFiles(kubevirtMetadataBasePath, claim, s.driverName, requestName)
+				metadataMounted[requestName] = true
+			}
+			edits, err = vfioContainerEdits(ctx, s.allocatable[result.Device], metadataFiles)
 		} else {
 			edits, err = s.applyConfig(ctx, result.Device, hostRsdPath)
 		}
