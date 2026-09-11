@@ -1,212 +1,64 @@
-name: Release Draft
+name: release
+
+# Publish from a version tag: vX.Y.Z-rcN -> Harbor, vX.Y.Z -> docker.io by
+# digest. Tags are created by cut-release / tag-release only.
+# Everything else lives in the release kit: https://github.com/RBLN-SW/cloud-component-release-kit
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
+  issues: write # GA deletes the "backport release-X.Y.Z" label
+  statuses: read # GA reads the rc-validation commit status
 
 jobs:
-  build-amd64:
-    uses: ./.github/workflows/image-build-push.yaml
+  release:
+    uses: RBLN-SW/cloud-component-release-kit/.github/workflows/release.yaml@v1
     with:
-      registry: docker.io
-      image_repository: rebellions/k8s-dra-driver-npu
-      image_tag: ${{ github.ref_name }}-amd64
-      runner: ubuntu-latest
-    secrets:
-      registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
-      registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      # Image names under the registry (HARBOR_REGISTRY / DOCKERHUB_REGISTRY),
+      # space separated.
+      images: k8s-dra-driver-npu
+      # Prefix of the GitHub release title.
+      release_name: RBLN DRA Driver for NPUs
+      # Helm chart directory, or remove both chart lines if there is no chart.
+      chart_dir: deployments/helm/k8s-dra-driver-npu
+      # yq expression that points the rc chart's image at Harbor, e.g.
+      # '.image.registry = env(HARBOR_HOST)'.
+      chart_rc_values: '.image.repository = strenv(HARBOR_REGISTRY) + "/k8s-dra-driver-npu"'
+    secrets: inherit
 
-  build-arm64:
-    uses: ./.github/workflows/image-build-push.yaml
-    with:
-      registry: docker.io
-      image_repository: rebellions/k8s-dra-driver-npu
-      image_tag: ${{ github.ref_name }}-arm64
-      runner: ubuntu-22.04-rbln-arm
-    secrets:
-      registry_id: ${{ secrets.DOCKERHUB_USERNAME }}
-      registry_password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-  manifest:
-    needs: [build-amd64, build-arm64]
-    runs-on: ubuntu-latest
-    env:
-      IMAGE: docker.io/rebellions/k8s-dra-driver-npu
+  # Hand the rc to the obedients dra scenario (.buildkite/pipeline.yml in release
+  # mode) once the kit has published it. The build's verdict lands as the
+  # `rc-validation` commit status on the rc commit, which the kit reads before GA
+  # (enforced once CLOUD_COMPONENT_RC_VALIDATION_ENFORCE is "true"). obedients is
+  # reachable only from the in-network runner.
+  rc-validate:
+    name: rc validation (obedients dra scenario)
+    needs: release
+    if: needs.release.outputs.kind == 'rc'
+    runs-on: rbln-sw-k8s-general
     steps:
-      - name: Set up Docker buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-      - name: Create version and latest manifests
-        run: |
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${{ github.ref_name }}" \
-            "${IMAGE}:${{ github.ref_name }}-amd64" \
-            "${IMAGE}:${{ github.ref_name }}-arm64"
-          docker buildx imagetools create \
-            --tag "${IMAGE}:latest" \
-            "${IMAGE}:${{ github.ref_name }}-amd64" \
-            "${IMAGE}:${{ github.ref_name }}-arm64"
-
-
-  package-helm-chart:
-    name: Package Helm chart
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-        with:
-          version: latest
-      - name: Package chart
+      - name: Install jq
+        run: command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+      - name: Trigger the validation build
         env:
-          TAG: ${{ github.ref_name }}
+          # Webhook trigger of the PR pipeline; the URL is the credential, so it
+          # lives in a secret. obedients applies the body's commit/branch/env.
+          TRIGGER_URL: ${{ secrets.OBEDIENTS_VALIDATE_TRIGGER_URL }}
+          SHA: ${{ needs.release.outputs.sha }}
+          BRANCH: ${{ needs.release.outputs.branch }}
         run: |
           set -euo pipefail
-          VERSION="${TAG#v}"
-          mkdir -p dist
-          helm package deployments/helm/k8s-dra-driver-npu \
-            --destination dist \
-            --version "$VERSION" \
-            --app-version "$TAG"
-      - name: Upload chart artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: helm-chart-${{ github.ref_name }}
-          path: dist/*.tgz
-
-  draft-release:
-    needs: [manifest, package-helm-chart]
-    runs-on: ubuntu-latest
-    steps:
-      # fetch-depth: 0 — the notes are a git log over a tag range, which a
-      # shallow clone cannot walk, and the previous tag is resolved from the
-      # full tag list.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Download chart artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: helm-chart-${{ github.ref_name }}
-          path: dist
-      - name: Get previous tag
-        run: |
-          # Previous release = previous tag in SemVer order, NOT the previous
-          # reachable tag. This repo's release tags are not a linear chain
-          # (v0.1.1 is not an ancestor of v0.1.2, nor v0.1.2 of v0.1.3), so both
-          # `git describe ${TAG}^` and `git rev-list --tags --skip=1` resolve
-          # v0.1.3's predecessor to v0.1.0 and replay the whole history.
-          PREV_TAG=$(git tag --list 'v*' --sort=-v:refname \
-            | awk -v cur="${GITHUB_REF_NAME}" 'found{print; exit} $0==cur{found=1}')
-          echo "previous_tag=$PREV_TAG" >> $GITHUB_ENV
-          echo "Previous tag: ${PREV_TAG:-<none>}"
-      - name: Generate release notes
-        run: |
-          CURRENT_TAG=${GITHUB_REF_NAME}
-          PREV_TAG=${previous_tag:-}
-          REPO="${GITHUB_REPOSITORY}"
-
-          if [ -n "$PREV_TAG" ]; then
-            RANGE="$PREV_TAG..$CURRENT_TAG"
-          else
-            RANGE="$CURRENT_TAG"
+          if [ -z "$TRIGGER_URL" ]; then
+            echo "::notice::secret OBEDIENTS_VALIDATE_TRIGGER_URL is not set; skipping rc validation, no rc-validation status will be posted for $GITHUB_REF_NAME"
+            exit 0
           fi
-
-          git log $RANGE --pretty=format:"%s ([%h](https://github.com/${REPO}/commit/%H))" \
-            | sed -E "s|\(#([0-9]+)\)|([#\1](https://github.com/${REPO}/pull/\1))|g" \
-            > commits.txt
-
-          # !-marked commits (feat!:, feat(scope)!:) are breaking per Conventional
-          # Commits: surface them in a dedicated section AND under their own type.
-          # Without the !? the type patterns silently drop breaking commits.
-          get_commits() { grep -E "^$1(\(.*\))?!?:" commits.txt || true; }
-
-          BREAKING=$(grep -E "^[a-z]+(\(.*\))?!:" commits.txt || true)
-
-          FEATS=$(get_commits "feat")
-          FIXES=$(get_commits "fix")
-          DOCS=$(get_commits "docs")
-          REFACTORS=$(get_commits "refactor")
-          PERFS=$(get_commits "perf")
-          STYLES=$(get_commits "style")
-          BUILDS=$(get_commits "build")
-          # `ci` is not in the operator's group list; without it this repo drops
-          # most of a release (8 of 25 commits in v0.1.2..v0.1.3).
-          CI=$(get_commits "ci")
-          CHORES=$(get_commits "chore")
-          TESTS=$(get_commits "test")
-
-          {
-            echo "# Release Notes"
-            echo
-
-            if [ -n "$BREAKING" ]; then
-              echo "## ⚠ Breaking Changes"
-              echo "$BREAKING" | sed 's/^/- /'
-              echo
-              echo "> Review the [README](https://github.com/${REPO}/blob/${CURRENT_TAG}/README.md) before upgrading."
-              echo
-            fi
-
-            echo "## New Features"
-            if [ -n "$FEATS" ]; then
-              echo "$FEATS" | sed 's/^/- /'
-            else
-              echo "- TBD"
-            fi
-            echo
-
-            echo "## Improvements"
-            IMPROVEMENTS=0
-
-            for GROUP in "$DOCS" "$REFACTORS" "$PERFS" "$STYLES" "$BUILDS" "$CI" "$CHORES" "$TESTS"; do
-              if [ -n "$GROUP" ]; then
-                IMPROVEMENTS=1
-              fi
-            done
-
-            if [ $IMPROVEMENTS -eq 1 ]; then
-              [ -n "$DOCS" ] && echo "$DOCS" | sed 's/^/- /'
-              [ -n "$REFACTORS" ] && echo "$REFACTORS" | sed 's/^/- /'
-              [ -n "$PERFS" ] && echo "$PERFS" | sed 's/^/- /'
-              [ -n "$STYLES" ] && echo "$STYLES" | sed 's/^/- /'
-              [ -n "$BUILDS" ] && echo "$BUILDS" | sed 's/^/- /'
-              [ -n "$CI" ] && echo "$CI" | sed 's/^/- /'
-              [ -n "$CHORES" ] && echo "$CHORES" | sed 's/^/- /'
-              [ -n "$TESTS" ] && echo "$TESTS" | sed 's/^/- /'
-            else
-              echo "- TBD"
-            fi
-            echo
-
-            echo "## Fixed Issues"
-            if [ -n "$FIXES" ]; then
-              echo "$FIXES" | sed 's/^/- /'
-            else
-              echo "- TBD"
-            fi
-            echo
-
-            echo "## Known Issues"
-            echo "- TBD"
-            echo
-            echo "_This draft was auto-generated for tag: ${CURRENT_TAG}_"
-          } > release_notes.md
-      - name: Create draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          tag_name: ${{ github.ref_name }}
-          name: "RBLN DRA Driver for NPUs ${{ github.ref_name }} Release"
-          body_path: release_notes.md
-          files: dist/*.tgz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          jq -n --arg sha "$SHA" --arg branch "$BRANCH" --arg tag "$GITHUB_REF_NAME" '{
+            commit: $sha, branch: $branch, message: ("rc-validation " + $tag),
+            env: { RELEASE_MODE: "true", DRA_IMAGE_TAG: $tag }
+          }' | curl -sSf -X POST -H 'Content-Type: application/json' -d @- "$TRIGGER_URL" > build.json
+          url=$(jq -r '.build.web_url // .web_url // ("build #" + ((.build.number // .number) | tostring))' build.json)
+          echo "rc-validation build for $GITHUB_REF_NAME: $url" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -15,18 +15,21 @@
 ARG GOLANG_VERSION=undefined
 ARG BASE_IMAGE=undefined
 ARG VERSION="N/A"
-FROM golang:${GOLANG_VERSION} AS build
+FROM --platform=$BUILDPLATFORM golang:${GOLANG_VERSION} AS build
 
 # Re-declared inside the stage so the build arg reaches make; without it the
 # binaries are stamped with no version and the startup log cannot say which
 # build is running.
 ARG VERSION
+# Set by buildx per target platform. Cross-compiling on the build host keeps the
+# Go toolchain off QEMU when the image is built for arm64.
+ARG TARGETARCH
 
 WORKDIR /build
 COPY . .
 
 RUN mkdir /artifacts
-RUN make PREFIX=/artifacts VERSION="$VERSION" cmds
+RUN make PREFIX=/artifacts VERSION="$VERSION" GOARCH="$TARGETARCH" cmds
 
 FROM ${BASE_IMAGE}
 
