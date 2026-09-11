@@ -8,12 +8,6 @@
 notify:
   - github_commit_status:
       context: "[DRA Driver] PR CI"
-  # Release mode only (RELEASE_MODE below): the build verdict doubles as the
-  # `rc-validation` status the release kit reads before GA. Pipeline and rc
-  # commit live in the same repo, so no token or status script is needed.
-  - github_commit_status:
-      context: "rc-validation"
-    if: build.env("RELEASE_MODE") == "true"
 
 env:
   HARBOR_HOST: harbor.k8s.rebellions.in

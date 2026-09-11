@@ -1,0 +1,52 @@
+name: rc-validation-status
+
+# Mirror the obedients build verdict on a release-candidate commit into the
+# `rc-validation` commit status the release kit reads before GA.
+#
+# The rc-validate job in release.yaml starts the obedients PR pipeline in release
+# mode on the rc commit. obedients reports that build only as the
+# "[DRA Driver] PR CI" status: the pipeline-level notify `if:` is not honoured
+# (verified on v0.2.0-rc1, build #40). A status event fires for every status
+# change in the repository; the job acts only when the commit carries a
+# vX.Y.Z-rcN tag, which PR head commits never do.
+#
+# status events run workflows from the default branch only.
+
+on:
+  status
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  mirror:
+    name: rc-validation
+    if: github.event.context == '[DRA Driver] PR CI'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Mirror the verdict onto rc commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.sha }}
+          STATE: ${{ github.event.state }}
+          TARGET_URL: ${{ github.event.target_url }}
+        run: |
+          set -euo pipefail
+          rc=$(git tag --points-at "$SHA" | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' || true; } | sort -V | tail -1)
+          if [ -z "$rc" ]; then
+            echo "commit ${SHA:0:12} carries no rc tag; not an rc validation build"
+            exit 0
+          fi
+          case "$STATE" in
+            success) out=success; desc="obedients dra scenario passed on $rc" ;;
+            pending) out=pending; desc="obedients dra scenario running on $rc" ;;
+            *)       out=failure; desc="obedients dra scenario $STATE on $rc" ;;
+          esac
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state="$out" -f context=rc-validation -f description="$desc" -f target_url="$TARGET_URL" >/dev/null
+          echo "rc-validation=$out on $rc (${SHA:0:12}) <- $TARGET_URL"
