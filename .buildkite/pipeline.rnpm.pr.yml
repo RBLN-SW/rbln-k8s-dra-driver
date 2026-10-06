@@ -11,4 +11,5 @@ steps:
       RNPM_TOKEN: RNPM_TOKEN
     command: |
       curl -fsSL -H "Authorization: Bearer $$RNPM_TOKEN" \
-        "${RNPM_URL}/api/v1/bundles/RBLN-SW/rbln-k8s-dra-driver/pr" | buildkite-agent pipeline upload
+        "${RNPM_URL}/api/v1/bundles/RBLN-SW/rbln-k8s-dra-driver/pr?run=$${RNPM_RUN:-}" | buildkite-agent pipeline upload
+        
