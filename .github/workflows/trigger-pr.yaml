@@ -64,8 +64,10 @@ jobs:
       registry_password: ${{ secrets.HARBOR_PASSWORD }}
   # Runs alongside image-build-push rather than gating it: blocking the push
   # would serialize two full image builds and make Buildkite's e2e wait on this
-  # one. A vulnerable image can still reach Harbor under its commit-SHA tag, but
-  # the PR stays red, so it cannot merge.
+  # one. Advisory: the job goes red on findings but is not a required check in
+  # the protect-main/release-branches rulesets, so a base-image CVE that lands
+  # overnight does not block unrelated PRs. The nightly run and the security
+  # tab remain the enforcement path.
   image-scan:
     needs: [lint, manifests-check]
     uses: ./.github/workflows/image-scan.yaml
