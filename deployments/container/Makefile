@@ -42,6 +42,12 @@ endif
 
 include $(CURDIR)/common.mk
 
+# Registry the Docker Hub official images (golang, ubuntu) are pulled from.
+# Point it at a pull-through cache such as Harbor's dockerhub-proxy project to
+# stay clear of Docker Hub's anonymous pull limit on a shared CI egress IP.
+DOCKERHUB_MIRROR ?= docker.io
+GOLANG_IMAGE = $(DOCKERHUB_MIRROR)/golang:$(GOLANG_VERSION)
+
 IMAGE_TAG := $(VERSION)
 IMAGE = $(IMAGE_NAME):$(IMAGE_TAG)
 
@@ -50,7 +56,7 @@ IMAGE = $(IMAGE_NAME):$(IMAGE_TAG)
 
 build: ubuntu22.04
 
-ubuntu22.04: BASE_IMAGE = docker.io/ubuntu:22.04
+ubuntu22.04: BASE_IMAGE = $(DOCKERHUB_MIRROR)/ubuntu:22.04
 
 # Use a generic build target to build the relevant images
 $(DISTRIBUTIONS):
@@ -59,7 +65,7 @@ $(DISTRIBUTIONS):
 		$(OUTPUT_OPTION) \
 		$(PLATFORM_OPTION) \
 		--tag $(IMAGE) \
-		--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
+		--build-arg GOLANG_IMAGE="$(GOLANG_IMAGE)" \
 		--build-arg BASE_IMAGE="$(BASE_IMAGE)" \
 		--build-arg VERSION="$(VERSION)" \
 		-f $(DOCKERFILE) \

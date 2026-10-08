@@ -143,10 +143,15 @@ steps:
       echo "$$REBEL_SW_DEV_PASSWORD" | docker login "${HARBOR_HOST}" \
         --username "$$REBEL_SW_DEV_USERNAME" --password-stdin
 
+      # Base images come through Harbor's Docker Hub proxy cache (same project
+      # the dind sidecar is pulled from): the build only logs in to Harbor, so
+      # direct docker.io pulls are anonymous and share one rate limit across
+      # every pipeline on this cluster's egress IP.
       make -f deployments/container/Makefile build \
         IMAGE_NAME="${IMAGE_NAME}" \
         IMAGE_TAG="$$IMAGE_TAG" \
         VERSION="$$IMAGE_TAG" \
+        DOCKERHUB_MIRROR="${HARBOR_HOST}/dockerhub-proxy/library" \
         PUSH_ON_BUILD=true
 
   - label: ":pytest: dra scenario"

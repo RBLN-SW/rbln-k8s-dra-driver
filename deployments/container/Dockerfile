@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG GOLANG_VERSION=undefined
+ARG GOLANG_IMAGE=undefined
 ARG BASE_IMAGE=undefined
 ARG VERSION="N/A"
-FROM --platform=$BUILDPLATFORM golang:${GOLANG_VERSION} AS build
+FROM --platform=$BUILDPLATFORM ${GOLANG_IMAGE} AS build
 
 # Re-declared inside the stage so the build arg reaches make; without it the
 # binaries are stamped with no version and the startup log cannot say which
