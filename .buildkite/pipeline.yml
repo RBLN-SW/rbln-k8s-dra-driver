@@ -79,10 +79,11 @@ env:
   # NodeFeature PCI fallback) so a node that is temporarily unlabeled cannot
   # silently shrink the set and change which RBLNDriver CRs get rendered.
   SENTINEL_NPU_FAMILIES: "${SENTINEL_NPU_FAMILIES:-atom,rebel100}"
+  # rbln-smd (ex rbln-daemon) is not family-split and has no tag knob: sentinel
+  # pins its tag to each RBLNDriver CR's driver version. The variable names
+  # keep the RBLN_DAEMON spelling because that is sentinel's config contract.
   SENTINEL_RBLN_DAEMON_IMAGE_REGISTRY: harbor.ssw.rbln.in
-  SENTINEL_RBLN_DAEMON_IMAGE_REPOSITORY: rebellions-dev/rbln-daemon
-  # Paired with the atom driver above; rbln-daemon is not family-split.
-  SENTINEL_RBLN_DAEMON_IMAGE_TAG: "${SENTINEL_RBLN_DAEMON_IMAGE_TAG:-3.2.2}"
+  SENTINEL_RBLN_DAEMON_IMAGE_REPOSITORY: rebellions-dev/rbln-smd
   # Compilers paired per family with the drivers above. Unlike the install-only
   # pipelines (metrics-exporter, NFD), scenario_03_dra runs model-zoo inference
   # once per present family (test_zz_dra_inference resolves the pip spec via
