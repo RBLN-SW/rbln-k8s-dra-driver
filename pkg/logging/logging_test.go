@@ -59,10 +59,10 @@ func TestLoggerDefaultsToInfoJSONWithNormalizedKeys(t *testing.T) {
 	if m["msg"] != "Started component" {
 		t.Fatalf("msg = %v", m["msg"])
 	}
-	// Encoding is pinned by TestJSONTimestampMatchesKubeletEncoding; here we
-	// only require the key to be present and numeric.
-	if _, ok := m["ts"].(float64); !ok {
-		t.Fatalf("ts missing or not a number: %#v", m["ts"])
+	// Encoding is pinned by TestJSONTimestampIsRFC3339Nano; here we only
+	// require the key to be present and a string.
+	if _, ok := m["ts"].(string); !ok {
+		t.Fatalf("ts missing or not a string: %#v", m["ts"])
 	}
 	if _, ok := m["caller"]; ok {
 		t.Fatal("caller must be absent at info level")

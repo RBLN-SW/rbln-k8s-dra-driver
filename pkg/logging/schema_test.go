@@ -10,30 +10,33 @@ import (
 	"time"
 )
 
-// Kubelet's component-base JSON encoder writes TimeKey "ts" as float epoch
-// millis. Emitting an RFC3339 string under the same key makes driver and
-// kubelet records un-co-ingestible: one field, two JSON types.
-func TestJSONTimestampMatchesKubeletEncoding(t *testing.T) {
-	before := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+// Every other Rebellions component writes "ts" as an RFC3339 string. A float
+// under the same key gives one field two JSON types in a shared index, so the
+// JSON format carries the same RFC3339Nano string the text format does.
+func TestJSONTimestampIsRFC3339Nano(t *testing.T) {
+	before := time.Now()
 	var buf bytes.Buffer
 	mustLogger(t, &buf, "info", "json").Info("Started component")
-	after := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+	after := time.Now()
 
 	var m map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
 		t.Fatalf("not JSON: %v: %s", err, buf.String())
 	}
-	ts, ok := m["ts"].(float64)
+	s, ok := m["ts"].(string)
 	if !ok {
-		t.Fatalf("ts = %#v, want float epoch millis like component-base", m["ts"])
+		t.Fatalf("ts = %#v, want RFC3339Nano string", m["ts"])
 	}
-	if ts < before || ts > after {
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatalf("ts %q is not RFC3339Nano: %v", s, err)
+	}
+	if ts.Before(before) || ts.After(after) {
 		t.Fatalf("ts = %v, outside [%v, %v]", ts, before, after)
 	}
 }
 
-// The text format exists for local debugging, where a readable timestamp beats
-// aggregator compatibility.
+// The text format uses the same timestamp encoding as JSON.
 func TestTextTimestampStaysRFC3339(t *testing.T) {
 	var buf bytes.Buffer
 	mustLogger(t, &buf, "info", "text").Info("Started component")
@@ -48,7 +51,8 @@ func TestTextTimestampStaysRFC3339(t *testing.T) {
 
 // Bucketing level to a closed vocabulary loses klog's V depth, and trace
 // admits V(8) — far too much to read without filtering. Carrying klog's own
-// `v` int alongside `level`, exactly as kubelet does, restores the filter.
+// `v` int alongside `level` restores the filter. Depth 0 says nothing that
+// `level` does not already say, so info records carry no `v`.
 func TestVerbosityAttrMirrorsKlogDepth(t *testing.T) {
 	for _, tc := range []struct {
 		emit  string
@@ -57,7 +61,7 @@ func TestVerbosityAttrMirrorsKlogDepth(t *testing.T) {
 	}{
 		{"error", slog.LevelError, nil},
 		{"warn", slog.LevelWarn, nil},
-		{"info", slog.LevelInfo, float64(0)},
+		{"info", slog.LevelInfo, nil},
 		{"debug", slog.LevelDebug, float64(4)},
 		{"trace", LevelTrace, float64(8)},
 	} {

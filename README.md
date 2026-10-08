@@ -57,23 +57,28 @@ helm install k8s-dra-driver-npu rebellions/k8s-dra-driver-npu \
 
 ### Record schema
 
-JSON records use the same field names and types as kubelet's own JSON logs, so
-both can be parsed by one collector configuration and indexed into one field
-mapping:
+JSON records use the field names kubelet's own JSON logs use, with `ts`
+encoded the way the other Rebellions components encode it, so one collector
+configuration can index them all into one field mapping:
 
 | Key | Type | Notes |
 |---|---|---|
-| `ts` | number | Epoch milliseconds, matching kubelet's component-base encoder. The `text` format uses RFC3339Nano instead. |
+| `ts` | string | RFC3339Nano, in both formats. |
 | `level` | string | `error`, `warn`, `info`, `debug`, `trace` — a closed vocabulary. |
-| `v` | number | klog verbosity depth, present below `warn`. `info` is `0`, `debug` `4`, `trace` up to `8`. |
+| `v` | number | klog verbosity depth, present on `debug` and `trace` records only. `debug` is `4`, `trace` up to `8`. |
 | `msg` | string | |
 | `err` | string | Present on failures. |
 | `caller` | string | `dir/file.go:line`, added at `debug` and below only. |
+| `logger` | string | `glog` on records relayed from `rblnlib-go` (RSD group create/destroy), `grpc` on grpc-go's own records (INFO lands at `debug`), `stderr` on anything else the process wrote to stderr. Absent on the driver's own records. |
 | `impact` | string | On the warn/error records where the driver degrades a workload instead of failing it, states what breaks. |
 
 Because `level` buckets every klog depth into five names, `v` is what
 distinguishes a `V(5)` record from a `V(7)` one — filter on it to make `trace`
 readable, e.g. `jq 'select(.v <= 5)'`.
+
+`rblnlib-go` logs through glog, which has no sink API. The plugin captures its
+stderr and re-emits each line as a record at glog's own severity, so RSD-group
+lines arrive as JSON rather than as glog text between the JSON records.
 
 Request-scoped records carry correlation keys: `requestID` and `method` from the
 DRA kubelet-plugin helper, plus `claimUID`, `claimNamespace` and `claimName` on

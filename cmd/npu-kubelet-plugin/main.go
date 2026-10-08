@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -75,10 +74,13 @@ func main() {
 	// raise klog's own V(n) gate to match; also enables contextual logging so
 	// ctx-derived loggers share the handler.
 	logging.BridgeKlog(level)
-	// glog (rblnlib-go rsdgroup/rblnsmi) defaults to files under /tmp; send it
-	// to stderr so RSD-group failures reach the container log stream. Ignore
-	// the error defensively in case a future rblnlib-go drops glog.
-	_ = flag.Set("logtostderr", "true")
+	// glog (rblnlib-go rsdgroup/rblnsmi) has no sink API and defaults to files
+	// under /tmp; relay it through the contract logger so RSD-group records
+	// land in the JSON stream instead of as text on stderr.
+	logging.BridgeGlog(level)
+	// grpc-go's default logger writes text to the os.Stderr it captured at
+	// init, which sidesteps the glog relay above; the webhook links no grpc.
+	logging.BridgeGrpclog()
 
 	slog.Info("Starting npu-kubelet-plugin",
 		"version", version, "logLevel", level, "logFormat", format)
