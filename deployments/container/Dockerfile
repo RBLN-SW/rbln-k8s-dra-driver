@@ -33,6 +33,13 @@ RUN make PREFIX=/artifacts VERSION="$VERSION" GOARCH="$TARGETARCH" cmds
 
 FROM ${BASE_IMAGE}
 
+# docker.io/ubuntu:22.04 is republished on Canonical's cadence, so a package fix
+# can be in the archive for weeks before --pull sees it. Apply pending updates
+# at build time so a base-image CVE is closed by the next rebuild.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 LABEL io.k8s.display-name="Rebellions NPU Resource Driver for Dynamic Resource Allocation (DRA)"
 LABEL name="Rebellions NPU Resource Driver for Dynamic Resource Allocation (DRA)"
 LABEL vendor="rebellions.ai"
