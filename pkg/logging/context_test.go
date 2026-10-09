@@ -95,8 +95,8 @@ func TestFromContextKeepsContractKeys(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
 		t.Fatalf("not JSON: %v: %s", err, buf.String())
 	}
-	if _, ok := m["ts"].(float64); !ok {
-		t.Errorf("ts = %#v, want float epoch millis", m["ts"])
+	if _, ok := m["ts"].(string); !ok {
+		t.Errorf("ts = %#v, want RFC3339Nano string", m["ts"])
 	}
 	if m["level"] != "debug" {
 		t.Errorf("level = %v, want debug", m["level"])

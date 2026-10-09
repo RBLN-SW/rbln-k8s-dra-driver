@@ -1,9 +1,9 @@
 // Package logging configures the process-wide slog logger: level-gated JSON
 // (default) or text on stdout, with output keys a Kubernetes log pipeline
-// already understands — "ts" (epoch millis in JSON, matching kubelet's
-// component-base encoder; RFC3339Nano in text), lowercase bucketed "level"
-// paired with klog's numeric "v" below warn, errors under "err", and a short
-// "caller" at debug and below.
+// already understands — "ts" as RFC3339Nano (the encoding the other
+// Rebellions components use, so one index can hold them all), lowercase
+// bucketed "level" paired with klog's numeric "v" on debug and trace records,
+// errors under "err", and a short "caller" at debug and below.
 package logging
 
 import (
@@ -41,7 +41,7 @@ func newLogger(w io.Writer, lvl slog.Level, format string) *slog.Logger {
 		Level: lvl,
 		// The caller attr's cost and noise are only worth it at debug and below.
 		AddSource:   lvl <= slog.LevelDebug,
-		ReplaceAttr: newReplaceAttr(format),
+		ReplaceAttr: replaceAttr,
 	}
 	var h slog.Handler
 	if format == "text" {
@@ -54,8 +54,8 @@ func newLogger(w io.Writer, lvl slog.Level, format string) *slog.Logger {
 
 // New builds a contract logger writing to w. Without it, code outside this
 // package cannot produce contract-shaped records: a bare slog.JSONHandler
-// writes "ERROR"/"time"/RFC3339 where the contract says "error"/"ts"/epoch
-// millis, so tests built on one would pin the wrong vocabulary.
+// writes "ERROR"/"time" where the contract says "error"/"ts", so tests built
+// on one would pin the wrong vocabulary.
 func New(w io.Writer, level, format string) (*slog.Logger, error) {
 	lvl, err := parseLevel(level)
 	if err != nil {
@@ -199,66 +199,62 @@ func levelName(l slog.Level) string {
 	}
 }
 
-// newReplaceAttr normalizes slog output to keys a Kubernetes log pipeline
+// replaceAttr normalizes slog output to keys a Kubernetes log pipeline
 // already understands: "ts", bucketed lowercase "level" plus klog's "v" depth,
 // and a zap-style "caller" ("dir/file.go:line") instead of the verbose source
-// group. The timestamp encoding depends on format, so this is built per logger.
-func newReplaceAttr(format string) func([]string, slog.Attr) slog.Attr {
-	return func(groups []string, a slog.Attr) slog.Attr {
-		if len(groups) > 0 {
-			return a
-		}
-		switch a.Key {
-		case slog.TimeKey:
-			// String-valued user "time" attrs pass through; a time-valued one is
-			// indistinguishable from the record timestamp and gets rewritten too.
-			if a.Value.Kind() != slog.KindTime {
-				return a
-			}
-			a.Key = "ts"
-			if format == "text" {
-				// Text is the local-debugging format, where a readable
-				// timestamp beats aggregator compatibility.
-				a.Value = slog.StringValue(a.Value.Time().Format(time.RFC3339Nano))
-			} else {
-				a.Value = slog.Float64Value(epochMillis(a.Value.Time()))
-			}
-		case slog.LevelKey:
-			lvl, ok := a.Value.Any().(slog.Level)
-			if !ok {
-				// Already rewritten: this is the inlined "level" string below.
-				return a
-			}
-			if lvl >= slog.LevelWarn {
-				a.Value = slog.StringValue(levelName(lvl))
-				return a
-			}
-			// Below warn, carry klog's own V depth next to the bucketed name.
-			// Bucketing alone would make V(5) and V(7) indistinguishable, and
-			// trace admits up to V(8) — unreadable without a numeric filter.
-			// An empty-key group is inlined by the stdlib handlers, which is
-			// how one ReplaceAttr call yields two keys.
-			return slog.Attr{Key: "", Value: slog.GroupValue(
-				slog.String(slog.LevelKey, levelName(lvl)),
-				slog.Int("v", klogVerbosity(lvl)),
-			)}
-		case slog.SourceKey:
-			src, ok := a.Value.Any().(*slog.Source)
-			if !ok {
-				return a
-			}
-			a.Key = "caller"
-			a.Value = slog.StringValue(fmt.Sprintf("%s:%d", trimPath(src.File), src.Line))
-		}
+// group.
+func replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) > 0 {
 		return a
 	}
-}
-
-// epochMillis matches component-base's JSON encoder (logs/json.
-// epochMillisTimeEncoder), so driver records and kubelet records can share one
-// "ts" field type in the same index instead of colliding string-vs-number.
-func epochMillis(t time.Time) float64 {
-	return float64(t.UnixNano()) / float64(time.Millisecond)
+	switch a.Key {
+	case slog.TimeKey:
+		// String-valued user "time" attrs pass through; a time-valued one is
+		// indistinguishable from the record timestamp and gets rewritten too.
+		if a.Value.Kind() != slog.KindTime {
+			return a
+		}
+		// RFC3339Nano rather than kubelet's epoch millis: the other Rebellions
+		// components write "ts" as an RFC3339 string, and a float under the
+		// same key gives one field two JSON types in a shared index.
+		a.Key = "ts"
+		a.Value = slog.StringValue(a.Value.Time().Format(time.RFC3339Nano))
+	case slog.LevelKey:
+		lvl, ok := a.Value.Any().(slog.Level)
+		if !ok {
+			// Already rewritten: this is the inlined "level" string below.
+			return a
+		}
+		v := klogVerbosity(lvl)
+		if v == 0 {
+			// Warn and above have no depth; info is depth 0, which the level
+			// name already says.
+			a.Value = slog.StringValue(levelName(lvl))
+			return a
+		}
+		// Below info, carry klog's own V depth next to the bucketed name.
+		// Bucketing alone would make V(5) and V(7) indistinguishable, and
+		// trace admits up to V(8) — unreadable without a numeric filter.
+		// An empty-key group is inlined by the stdlib handlers, which is
+		// how one ReplaceAttr call yields two keys.
+		return slog.Attr{Key: "", Value: slog.GroupValue(
+			slog.String(slog.LevelKey, levelName(lvl)),
+			slog.Int("v", v),
+		)}
+	case slog.SourceKey:
+		src, ok := a.Value.Any().(*slog.Source)
+		if !ok {
+			return a
+		}
+		if src.File == "" {
+			// A record built without a PC (the glog relay) has no source;
+			// dropping the attr lets it supply its own "caller".
+			return slog.Attr{}
+		}
+		a.Key = "caller"
+		a.Value = slog.StringValue(fmt.Sprintf("%s:%d", trimPath(src.File), src.Line))
+	}
+	return a
 }
 
 // trimPath keeps at most the last two path segments for a zap-style short caller.

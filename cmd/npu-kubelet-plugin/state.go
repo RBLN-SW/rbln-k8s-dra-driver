@@ -607,18 +607,20 @@ func setNumaNodeAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]re
 	if numaNode == "" {
 		return
 	}
+	// rbln-smi prints "N/A" where sysfs reports -1.
+	noAffinity := numaNode == "N/A"
 	v, err := strconv.ParseInt(numaNode, 10, 64)
-	if err != nil {
+	if err != nil && !noAffinity {
 		logging.FromContext(ctx).Warn("Ignoring unparseable NUMA node",
 			"device", deviceName, "numaNode", numaNode, "err", err,
 			"impact", "device published without a numaNode attribute")
 		return
 	}
-	if v < 0 {
-		// sysfs reports -1 for a device without NUMA affinity (single-socket
-		// hosts, or firmware that does not expose it). The standard attribute
-		// is omitted rather than published as -1, which no CPU or NIC device
-		// would match. Expected on such hosts, so debug rather than warn.
+	if noAffinity || v < 0 {
+		// A device without NUMA affinity (single-socket hosts, or firmware
+		// that does not expose it). The standard attribute is omitted rather
+		// than published as -1, which no CPU or NIC device would match.
+		// Expected on such hosts, so debug rather than warn.
 		logging.FromContext(ctx).Debug("Device reports no NUMA affinity, omitting numaNode attribute",
 			"device", deviceName, "numaNode", numaNode)
 		return

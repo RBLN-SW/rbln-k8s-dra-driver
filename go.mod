@@ -4,6 +4,7 @@ go 1.25.13
 
 require (
 	github.com/go-logr/logr v1.4.3
+	github.com/golang/glog v1.2.5
 	github.com/rbln-sw/rblnlib-go v0.2.0
 	github.com/urfave/cli/v2 v2.25.3
 	google.golang.org/grpc v1.83.2
@@ -29,7 +30,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
-	github.com/golang/glog v1.2.5 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect

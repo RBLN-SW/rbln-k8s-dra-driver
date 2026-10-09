@@ -216,3 +216,28 @@ func TestDeviceNameDelta(t *testing.T) {
 		t.Errorf("delta of nothing = %v/%v, want two empty slices", added, removed)
 	}
 }
+
+// rbln-smi prints numa_node "N/A" where sysfs reports -1. Both mean the device
+// has no NUMA affinity, so "N/A" is the debug omission, not a warn about
+// malformed input that fires once per device on every start.
+func TestSetNumaNodeAttrTreatsNAAsNoAffinity(t *testing.T) {
+	buf := logtest.Capture(t, "debug")
+
+	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{}
+	setNumaNodeAttr(context.Background(), attrs, "rbln0", "N/A")
+
+	if len(attrs) != 0 {
+		t.Errorf("attrs = %v, want none for numa_node=N/A", attrs)
+	}
+	lines := logtest.Lines(t, buf)
+	if logtest.Find(lines, "Ignoring unparseable NUMA node") != nil {
+		t.Error("N/A must not be reported as unparseable")
+	}
+	line := logtest.Find(lines, "Device reports no NUMA affinity, omitting numaNode attribute")
+	if line == nil {
+		t.Fatalf("no-affinity omission was not reported at debug: %s", buf.String())
+	}
+	if line["device"] != "rbln0" || line["numaNode"] != "N/A" {
+		t.Errorf("device/numaNode = %v/%v", line["device"], line["numaNode"])
+	}
+}
