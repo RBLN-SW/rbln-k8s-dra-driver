@@ -30,16 +30,15 @@ jobs:
       chart_rc_values: '.image.repository = strenv(HARBOR_REGISTRY) + "/k8s-dra-driver-npu"'
     secrets: inherit
 
-  # Hand the rc to the obedients dra scenario (.buildkite/pipeline.yml in release
-  # mode) once the kit has published it, then wait for the verdict and record it
-  # as the `rc-validation` commit status the kit reads before GA (enforced once
-  # CLOUD_COMPONENT_RC_VALIDATION_ENFORCE is "true"). obedients reports the build
-  # only as its "[DRA Driver] PR CI" status, so the verdict is polled from there.
+  # Trigger validation once the kit has published the rc, then require both
+  # RNPM container and sandbox checks from that build before recording the
+  # `rc-validation` commit status the kit reads before GA (enforced once
+  # CLOUD_COMPONENT_RC_VALIDATION_ENFORCE is "true").
   # Do not mirror it from a `status` event workflow: obedients re-posts its status
   # whenever another status lands on the commit, which turns any event-driven
   # mirror into a loop (313 round trips on v0.2.0-rc2).
   rc-validate:
-    name: rc validation · trigger obedients
+    name: rc validation · trigger RNPM via obedients
     needs: release
     if: needs.release.outputs.kind == 'rc'
     # obedients is reachable only from the in-network runner.
@@ -53,8 +52,10 @@ jobs:
       - name: Trigger the validation build
         id: trigger
         env:
-          # Webhook trigger of the PR pipeline; the URL is the credential, so it
-          # lives in a secret. obedients applies the body's commit/branch/env.
+          # This webhook must target an RNPM validation pipeline that honors
+          # RELEASE_MODE/DRA_IMAGE_TAG and tests the published rc image. The
+          # ordinary PR bundle builds and tests a commit-SHA image instead.
+          # The URL is the credential, so it lives in a secret.
           TRIGGER_URL: ${{ secrets.OBEDIENTS_VALIDATE_TRIGGER_URL }}
           SHA: ${{ needs.release.outputs.sha }}
           BRANCH: ${{ needs.release.outputs.branch }}
@@ -69,7 +70,8 @@ jobs:
             commit: $sha, branch: $branch, message: ("rc-validation " + $tag),
             env: { RELEASE_MODE: "true", DRA_IMAGE_TAG: $tag }
           }' | curl -sSf -X POST -H 'Content-Type: application/json' -d @- "$TRIGGER_URL" > build.json
-          url=$(jq -r '.build.web_url // .web_url // ("build #" + ((.build.number // .number) | tostring))' build.json)
+          # The URL also identifies which build's commit statuses may count.
+          url=$(jq -er '.build.web_url // .web_url | select(type == "string" and startswith("https://")) | rtrimstr("/")' build.json)
           echo "rc-validation build for $GITHUB_REF_NAME: $url" | tee -a "$GITHUB_STEP_SUMMARY"
           { echo "build_url=$url"; echo "triggered_at=$triggered_at"; } >> "$GITHUB_OUTPUT"
 
@@ -81,12 +83,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Wait for the obedients verdict and record it
+      - name: Wait for both RNPM checks and record the verdict
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ needs.release.outputs.sha }}
           BUILD_URL: ${{ needs.rc-validate.outputs.build_url }}
           TRIGGERED_AT: ${{ needs.rc-validate.outputs.triggered_at }}
+          REQUIRED_CONTEXTS: '["[RNPM] PR CI - container", "[RNPM] PR CI - sandbox"]'
         run: |
           set -euo pipefail
           post() {
@@ -94,18 +97,37 @@ jobs:
               -f description="$2" -f target_url="$BUILD_URL" >/dev/null
             echo "rc-validation=$1: $2"
           }
-          post pending "obedients dra scenario running on $GITHUB_REF_NAME"
-          # Only a status newer than the trigger counts: a re-run must not read
-          # the previous build's verdict off the same commit.
+          post pending "RNPM container and sandbox validation running on $GITHUB_REF_NAME"
+          # Read all status pages: a concurrent PR build on the same commit can
+          # replace the combined endpoint's latest status for either context.
+          # Only fresh statuses linked to this validation build may count.
           for _ in $(seq 1 170); do
-            # gh api has no --arg: the timestamp is interpolated into the jq program.
-            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/status" \
-              --jq ".statuses[] | select(.context == \"[DRA Driver] PR CI\" and .updated_at > \"$TRIGGERED_AT\") | .state")
+            if ! statuses=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100"); then
+              post error "Could not read RNPM validation statuses"
+              exit 1
+            fi
+            state=$(jq -r --argjson contexts "$REQUIRED_CONTEXTS" \
+              --arg build_url "$BUILD_URL" --arg triggered_at "$TRIGGERED_AT" '
+              [.[][]
+                | select(.created_at >= $triggered_at)
+                | select(((.target_url // "") | split("#")[0] | rtrimstr("/")) == $build_url)
+              ] as $statuses
+              | [$contexts[] as $context
+                  | ($statuses | map(select(.context == $context))
+                    | max_by([.created_at, .id]) | .state // "pending")
+                ] as $states
+              | if any($states[]; . == "failure") then "failure"
+                elif any($states[]; . == "error") then "error"
+                elif all($states[]; . == "success") then "success"
+                else "pending"
+                end
+              ' <<< "$statuses")
             case "$state" in
-              success) post success "obedients dra scenario passed on $GITHUB_REF_NAME"; exit 0 ;;
-              failure|error) post failure "obedients dra scenario $state on $GITHUB_REF_NAME"; exit 1 ;;
+              success) post success "RNPM container and sandbox passed on $GITHUB_REF_NAME"; exit 0 ;;
+              failure) post failure "RNPM validation failed on $GITHUB_REF_NAME"; exit 1 ;;
+              error) post error "RNPM validation infrastructure error on $GITHUB_REF_NAME"; exit 1 ;;
             esac
             sleep 60
           done
-          post error "obedients dra scenario did not finish within 170 minutes"
+          post error "RNPM container and sandbox validation did not finish within 170 minutes"
           exit 1
