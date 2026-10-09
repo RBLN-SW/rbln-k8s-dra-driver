@@ -52,22 +52,11 @@ jobs:
     needs: pr-title-validation
     uses: ./.github/workflows/manifests.check.yaml
     secrets: inherit
-  image-build-push:
-    needs: [lint, manifests-check]
-    uses: ./.github/workflows/image-build-push.yaml
-    with:
-      registry: harbor.k8s.rebellions.in
-      image_repository: ${{ vars.IMAGE_REPOSITORY }}
-      image_tag: ${{ github.sha }}
-    secrets:
-      registry_id: ${{ secrets.HARBOR_USERNAME }}
-      registry_password: ${{ secrets.HARBOR_PASSWORD }}
-  # Runs alongside image-build-push rather than gating it: blocking the push
-  # would serialize two full image builds and make Buildkite's e2e wait on this
-  # one. Advisory: the job goes red on findings but is not a required check in
-  # the protect-main/release-branches rulesets, so a base-image CVE that lands
-  # overnight does not block unrelated PRs. The nightly run and the security
-  # tab remain the enforcement path.
+  # Buildkite builds and pushes the PR image used by its DRA scenario.
+  # This scan builds a separate local image and is advisory: findings fail
+  # the job, but it is not required by protect-main/release-branches, so a
+  # base-image CVE that lands overnight does not block unrelated PRs.
+  # Findings remain visible in the security tab and nightly notifications.
   image-scan:
     needs: [lint, manifests-check]
     uses: ./.github/workflows/image-scan.yaml
