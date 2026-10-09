@@ -52,6 +52,8 @@ var pciDeviceIDToProductName = map[string]string{
 	"1221": "RBLN-CA22",
 	"1250": "RBLN-CA25",
 	"1251": "RBLN-CA25",
+	"2130": "RBLN-CR13",
+	"2131": "RBLN-CR13",
 }
 
 // enumerateVfioDevices lists the Rebellions NPUs bound to vfio-pci under the

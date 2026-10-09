@@ -179,6 +179,42 @@ func TestEnumerateVfioDevices(t *testing.T) {
 	}
 }
 
+func TestEnumerateVfioDevicesCR13ProductName(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deviceID string
+		vf       bool
+	}{
+		{name: "PF", deviceID: "0x2130"},
+		{name: "VF", deviceID: "0x2131", vf: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dev := rblnVfioDevice("0000:27:00.0")
+			dev.device = tc.deviceID
+			dev.physfn = tc.vf
+			root := writeFakeSysfs(t, []fakePCIDevice{dev})
+
+			devices, err := enumerateVfioDevices(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(devices) != 1 {
+				t.Fatalf("expected 1 device, got %d", len(devices))
+			}
+
+			// ResourceClaim selectors must be able to match CR13 by productName
+			// while distinguishing physical and virtual functions via vf.
+			attrs := devices[0].Attributes
+			if attr := attrs["productName"]; attr.StringValue == nil || *attr.StringValue != "RBLN-CR13" {
+				t.Errorf("CR13 device %s must publish productName=RBLN-CR13, got %+v", tc.deviceID, attr)
+			}
+			if attr := attrs["vf"]; attr.BoolValue == nil || *attr.BoolValue != tc.vf {
+				t.Errorf("CR13 device %s must publish vf=%t, got %+v", tc.deviceID, tc.vf, attr)
+			}
+		})
+	}
+}
+
 func TestEnumerateVfioDevicesFiltering(t *testing.T) {
 	rblnBound := rblnVfioDevice("0000:27:00.0")
 	rblnBound.driver = "rebellions"
