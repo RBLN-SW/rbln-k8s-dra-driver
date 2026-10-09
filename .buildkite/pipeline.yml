@@ -80,9 +80,6 @@ env:
   # silently shrink the set and change which RBLNDriver CRs get rendered.
   SENTINEL_NPU_FAMILIES: "${SENTINEL_NPU_FAMILIES:-atom,rebel100}"
   SENTINEL_RBLN_DAEMON_IMAGE_REGISTRY: harbor.ssw.rbln.in
-  SENTINEL_RBLN_DAEMON_IMAGE_REPOSITORY: rebellions-dev/rbln-daemon
-  # Paired with the atom driver above; rbln-daemon is not family-split.
-  SENTINEL_RBLN_DAEMON_IMAGE_TAG: "${SENTINEL_RBLN_DAEMON_IMAGE_TAG:-3.2.2}"
   # Compilers paired per family with the drivers above. Unlike the install-only
   # pipelines (metrics-exporter, NFD), scenario_03_dra runs model-zoo inference
   # once per present family (test_zz_dra_inference resolves the pip spec via
