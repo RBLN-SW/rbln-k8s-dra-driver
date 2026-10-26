@@ -113,6 +113,12 @@ stamped from the release tag. A plain `make cmds` with no `VERSION` reports
 
 See `examples/README.md` for usage examples.
 
+## PR CI
+
+Obedients loads the [RNPM PR bootstrap](.buildkite/pipeline.rnpm.pr.yml).
+The registered RNPM `pr` bundle defines the image build and Sentinel tests;
+this repository no longer keeps a separate legacy Buildkite PR pipeline.
+
 ## RC validation
 
 Release candidates are tested through RNPM using their published images.
