@@ -29,7 +29,9 @@ WORKDIR /build
 COPY . .
 
 RUN mkdir /artifacts
-RUN make PREFIX=/artifacts VERSION="$VERSION" GOARCH="$TARGETARCH" cmds
+# CI checkouts may borrow Git objects from a mirror outside the build context.
+# VERSION still reaches main.version through the Makefile's linker flags.
+RUN GOFLAGS=-buildvcs=false make PREFIX=/artifacts VERSION="$VERSION" GOARCH="$TARGETARCH" cmds
 
 FROM ${BASE_IMAGE}
 

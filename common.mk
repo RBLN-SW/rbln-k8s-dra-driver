@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-GOLANG_VERSION ?= 1.26.9
+GOLANG_VERSION ?= 1.26.10
 
 # Read by .github/workflows/image-scan.yaml so CI and `make scan` agree on the
 # scanner version.
