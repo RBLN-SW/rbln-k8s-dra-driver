@@ -12,7 +12,7 @@ on:
 permissions:
   contents: write
   issues: write # GA deletes the "backport release-X.Y.Z" label
-  statuses: write # rc-validate-wait posts the rc-validation status; GA reads it
+  statuses: read # the release kit reads the status reported by RNPM
 
 jobs:
   release:
@@ -30,104 +30,31 @@ jobs:
       chart_rc_values: '.image.repository = strenv(HARBOR_REGISTRY) + "/k8s-dra-driver-npu"'
     secrets: inherit
 
-  # Trigger validation once the kit has published the rc, then require both
-  # RNPM container and sandbox checks from that build before recording the
-  # `rc-validation` commit status the kit reads before GA (enforced once
-  # CLOUD_COMPONENT_RC_VALIDATION_ENFORCE is "true").
-  # Do not mirror it from a `status` event workflow: obedients re-posts its status
-  # whenever another status lands on the commit, which turns any event-driven
-  # mirror into a loop (313 round trips on v0.2.0-rc2).
+  # Validate the already-published image through RNPM. Its run overrides
+  # disable rebuilding and target the release commit's rc-validation status.
   rc-validate:
-    name: rc validation · trigger RNPM via obedients
+    name: RNPM RC validation
     needs: release
     if: needs.release.outputs.kind == 'rc'
-    # obedients is reachable only from the in-network runner.
     runs-on: rbln-sw-k8s-general
-    outputs:
-      build_url: ${{ steps.trigger.outputs.build_url }}
-      triggered_at: ${{ steps.trigger.outputs.triggered_at }}
-    steps:
-      - name: Install jq
-        run: command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
-      - name: Trigger the validation build
-        id: trigger
-        env:
-          # This webhook must target an RNPM validation pipeline that honors
-          # RELEASE_MODE/DRA_IMAGE_TAG and tests the published rc image. The
-          # ordinary PR bundle builds and tests a commit-SHA image instead.
-          # The URL is the credential, so it lives in a secret.
-          TRIGGER_URL: ${{ secrets.OBEDIENTS_VALIDATE_TRIGGER_URL }}
-          SHA: ${{ needs.release.outputs.sha }}
-          BRANCH: ${{ needs.release.outputs.branch }}
-        run: |
-          set -euo pipefail
-          if [ -z "$TRIGGER_URL" ]; then
-            echo "::notice::secret OBEDIENTS_VALIDATE_TRIGGER_URL is not set; skipping rc validation, no rc-validation status will be posted for $GITHUB_REF_NAME"
-            exit 0
-          fi
-          triggered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          jq -n --arg sha "$SHA" --arg branch "$BRANCH" --arg tag "$GITHUB_REF_NAME" '{
-            commit: $sha, branch: $branch, message: ("rc-validation " + $tag),
-            env: { RELEASE_MODE: "true", DRA_IMAGE_TAG: $tag }
-          }' | curl -sSf -X POST -H 'Content-Type: application/json' -d @- "$TRIGGER_URL" > build.json
-          # The URL also identifies which build's commit statuses may count.
-          url=$(jq -er '.build.web_url // .web_url | select(type == "string" and startswith("https://")) | rtrimstr("/")' build.json)
-          echo "rc-validation build for $GITHUB_REF_NAME: $url" | tee -a "$GITHUB_STEP_SUMMARY"
-          { echo "build_url=$url"; echo "triggered_at=$triggered_at"; } >> "$GITHUB_OUTPUT"
-
-  rc-validate-wait:
-    name: rc validation · verdict -> rc-validation status
-    needs: [release, rc-validate]
-    if: needs.rc-validate.outputs.build_url != ''
-    # GitHub API only; no obedients access needed here.
-    runs-on: ubuntu-latest
     timeout-minutes: 180
+    outputs:
+      build_url: ${{ steps.validate.outputs.build_url }}
+      run_id: ${{ steps.validate.outputs.run_id }}
     steps:
-      - name: Wait for both RNPM checks and record the verdict
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+      - name: Trigger RNPM and wait for its RC verdict
+        id: validate
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ needs.release.outputs.sha }}
-          BUILD_URL: ${{ needs.rc-validate.outputs.build_url }}
-          TRIGGERED_AT: ${{ needs.rc-validate.outputs.triggered_at }}
-          REQUIRED_CONTEXTS: '["[RNPM] PR CI - container", "[RNPM] PR CI - sandbox"]'
-        run: |
-          set -euo pipefail
-          post() {
-            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$1" -f context=rc-validation \
-              -f description="$2" -f target_url="$BUILD_URL" >/dev/null
-            echo "rc-validation=$1: $2"
-          }
-          post pending "RNPM container and sandbox validation running on $GITHUB_REF_NAME"
-          # Read all status pages: a concurrent PR build on the same commit can
-          # replace the combined endpoint's latest status for either context.
-          # Only fresh statuses linked to this validation build may count.
-          for _ in $(seq 1 170); do
-            if ! statuses=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100"); then
-              post error "Could not read RNPM validation statuses"
-              exit 1
-            fi
-            state=$(jq -r --argjson contexts "$REQUIRED_CONTEXTS" \
-              --arg build_url "$BUILD_URL" --arg triggered_at "$TRIGGERED_AT" '
-              [.[][]
-                | select(.created_at >= $triggered_at)
-                | select(((.target_url // "") | split("#")[0] | rtrimstr("/")) == $build_url)
-              ] as $statuses
-              | [$contexts[] as $context
-                  | ($statuses | map(select(.context == $context))
-                    | max_by([.created_at, .id]) | .state // "pending")
-                ] as $states
-              | if any($states[]; . == "failure") then "failure"
-                elif any($states[]; . == "error") then "error"
-                elif all($states[]; . == "success") then "success"
-                else "pending"
-                end
-              ' <<< "$statuses")
-            case "$state" in
-              success) post success "RNPM container and sandbox passed on $GITHUB_REF_NAME"; exit 0 ;;
-              failure) post failure "RNPM validation failed on $GITHUB_REF_NAME"; exit 1 ;;
-              error) post error "RNPM validation infrastructure error on $GITHUB_REF_NAME"; exit 1 ;;
-            esac
-            sleep 60
-          done
-          post error "RNPM container and sandbox validation did not finish within 170 minutes"
-          exit 1
+          RNPM_URL: ${{ vars.RNPM_URL || 'https://rnpm.k8s.rebellions.in' }}
+          RNPM_TOKEN: ${{ secrets.RNPM_TOKEN }}
+          RNPM_RC_BUNDLE_ID: ${{ vars.RNPM_RC_BUNDLE_ID }}
+          RC_TAG: ${{ github.ref_name }}
+          RC_SHA: ${{ needs.release.outputs.sha }}
+          RC_BRANCH: ${{ needs.release.outputs.branch }}
+          HARBOR_REGISTRY: ${{ vars.CLOUD_COMPONENT_HARBOR_REGISTRY }}
+          SENTINEL_REF: ${{ vars.RC_VALIDATION_SENTINEL_REF }}
+          OPERATOR_REF: ${{ vars.RC_VALIDATION_OPERATOR_REF }}
+        run: python3 .github/scripts/rnpm_rc.py
