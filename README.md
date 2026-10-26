@@ -112,3 +112,8 @@ stamped from the release tag. A plain `make cmds` with no `VERSION` reports
 ## Usage Examples
 
 See `examples/README.md` for usage examples.
+
+## RC validation
+
+Release candidates are tested through RNPM using their published images.
+See [RC validation setup and image inputs](docs/rc-validation.md).

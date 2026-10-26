@@ -1,0 +1,7 @@
+# Git metadata can point to a CI mirror or worktree outside the build context.
+.git
+
+# Local caches and test output are not image inputs.
+.cache
+**/__pycache__
+coverage.out

@@ -1,6 +1,6 @@
 module github.com/RBLN-SW/k8s-dra-driver-npu
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/go-logr/logr v1.4.3
