@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modifications Copyright 2026 Rebellions Inc.
+# This file is derived from github.com/kubernetes-sigs/dra-example-driver
+# (deployments/container/Dockerfile, tag v0.2.1) and has been
+# modified by Rebellions Inc. See NOTICE for details.
 
 ARG GOLANG_VERSION=undefined
 ARG BASE_IMAGE=undefined
@@ -51,6 +56,11 @@ ARG RELEASE="N/A"
 LABEL release="N/A"
 LABEL summary="Rebellions NPU DRA resource driver for Kubernetes"
 LABEL description="See summary"
+LABEL maintainer="Rebellions sw_devops@rebellions.ai"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.source="https://github.com/RBLN-SW/rbln-k8s-dra-driver"
+LABEL org.opencontainers.image.vendor="Rebellions Inc."
 
 COPY --from=build /artifacts/npu-kubelet-plugin /usr/bin/npu-kubelet-plugin
 COPY --from=build /artifacts/webhook       /usr/bin/webhook
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES /licenses/

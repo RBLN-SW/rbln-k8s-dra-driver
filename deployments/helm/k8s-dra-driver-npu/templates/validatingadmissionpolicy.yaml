@@ -1,3 +1,9 @@
+{{/*
+Copyright The Kubernetes Authors. Apache License 2.0.
+This file is derived from github.com/kubernetes-sigs/dra-example-driver
+(deployments/helm/dra-example-driver/templates/validatingadmissionpolicy.yaml, tag v0.2.1).
+Modifications Copyright 2026 Rebellions Inc. See NOTICE for details.
+*/}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

@@ -1,3 +1,8 @@
+# Copyright The Kubernetes Authors. Apache License 2.0.
+# This file is derived from github.com/kubernetes-sigs/dra-example-driver
+# (deployments/helm/dra-example-driver/values.yaml, tag v0.2.1).
+# Modifications Copyright 2026 Rebellions Inc. See NOTICE for details.
+
 # Default values for k8s-dra-driver-npu.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.

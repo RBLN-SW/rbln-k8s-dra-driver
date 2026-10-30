@@ -26,3 +26,12 @@ version: 0.0.0-dev
 appVersion: "v0.2.1"
 
 kubeVersion: ">=1.32.0-0"
+
+home: https://github.com/RBLN-SW/rbln-k8s-dra-driver
+sources:
+  - https://github.com/RBLN-SW/rbln-k8s-dra-driver
+maintainers:
+  - name: Rebellions Inc.
+    email: sw_devops@rebellions.ai
+annotations:
+  artifacthub.io/license: Apache-2.0
