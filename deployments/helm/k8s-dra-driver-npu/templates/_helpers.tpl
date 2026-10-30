@@ -1,4 +1,10 @@
 {{/*
+Copyright The Kubernetes Authors. Apache License 2.0.
+This file is derived from github.com/kubernetes-sigs/dra-example-driver
+(deployments/helm/dra-example-driver/templates/_helpers.tpl, tag v0.2.1).
+Modifications Copyright 2026 Rebellions Inc. See NOTICE for details.
+*/}}
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "k8s-dra-driver-npu.name" -}}

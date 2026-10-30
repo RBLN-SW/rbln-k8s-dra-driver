@@ -14,6 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+/*
+Modifications Copyright 2026 Rebellions Inc.
+
+This file is derived from github.com/kubernetes-sigs/dra-example-driver
+(cmd/dra-example-webhook/main.go, tag v0.2.1) and has been
+modified by Rebellions Inc. See NOTICE for details.
+*/
+
 package main
 
 import (
