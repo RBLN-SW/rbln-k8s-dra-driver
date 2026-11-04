@@ -19,6 +19,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,12 +50,14 @@ func TestResolvePCIERootID(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			got, err := resolvePCIERootID(busDir, tc.busID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tc.want {
-				t.Errorf("resolvePCIERootID(%s) = %q, want %q", tc.busID, got, tc.want)
+			for _, query := range []string{tc.busID, strings.ToUpper(tc.busID)} {
+				got, err := resolvePCIERootID(busDir, query)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != tc.want {
+					t.Errorf("resolvePCIERootID(%s) = %q, want %q", query, got, tc.want)
+				}
 			}
 		})
 	}

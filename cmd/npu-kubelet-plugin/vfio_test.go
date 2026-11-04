@@ -20,6 +20,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	resourceapi "k8s.io/api/resource/v1"
@@ -37,7 +39,8 @@ type fakePCIDevice struct {
 	iommuGroup string
 	numaNode   string
 	rootPort   string
-	physfn     bool
+	physfnOf   string // parent PF bus ID; physfn then points at a real PF entry
+	numVFs     string
 }
 
 // writeFakeSysfs lays out a sysfs-like tree:
@@ -62,10 +65,11 @@ func writeFakeSysfs(t *testing.T, devices []fakePCIDevice) string {
 		}
 
 		files := map[string]string{
-			"vendor":    dev.vendor,
-			"class":     dev.class,
-			"device":    dev.device,
-			"numa_node": dev.numaNode,
+			"vendor":       dev.vendor,
+			"class":        dev.class,
+			"device":       dev.device,
+			"numa_node":    dev.numaNode,
+			"sriov_numvfs": dev.numVFs,
 		}
 		for name, value := range files {
 			if value == "" {
@@ -88,16 +92,19 @@ func writeFakeSysfs(t *testing.T, devices []fakePCIDevice) string {
 
 		if dev.iommuGroup != "" {
 			groupDir := filepath.Join(dir, "sys", "kernel", "iommu_groups", dev.iommuGroup)
-			if err := os.MkdirAll(groupDir, 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(groupDir, "devices"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Symlink(groupDir, filepath.Join(devDir, "iommu_group")); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Symlink(devDir, filepath.Join(groupDir, "devices", dev.busID)); err != nil {
+				t.Fatal(err)
+			}
 		}
 
-		if dev.physfn {
-			if err := os.Symlink(devDir, filepath.Join(devDir, "physfn")); err != nil {
+		if dev.physfnOf != "" {
+			if err := os.Symlink("../"+dev.physfnOf, filepath.Join(devDir, "physfn")); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -111,13 +118,14 @@ func writeFakeSysfs(t *testing.T, devices []fakePCIDevice) string {
 }
 
 func rblnVfioDevice(busID string) fakePCIDevice {
+	group, _ := strconv.ParseUint(strings.NewReplacer(":", "", ".", "").Replace(busID), 16, 64)
 	return fakePCIDevice{
 		busID:      busID,
 		vendor:     rblnPCIVendorID,
 		class:      npuPCIClassID,
 		device:     "0x1251",
 		driver:     vfioPCIDriverName,
-		iommuGroup: "42",
+		iommuGroup: strconv.FormatUint(group, 10),
 		numaNode:   "0",
 		rootPort:   "0000:00:01.0",
 	}
@@ -125,9 +133,10 @@ func rblnVfioDevice(busID string) fakePCIDevice {
 
 func TestEnumerateVfioDevices(t *testing.T) {
 	dev := rblnVfioDevice("0000:27:00.0")
+	dev.iommuGroup = "42"
 	root := writeFakeSysfs(t, []fakePCIDevice{dev})
 
-	devices, err := enumerateVfioDevices(context.Background(), root)
+	devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,11 +150,12 @@ func TestEnumerateVfioDevices(t *testing.T) {
 	}
 
 	wantString := map[resourceapi.QualifiedName]string{
-		deviceTypeAttributeKey: deviceTypeVfio,
-		pciBusIDAttributeKey:   "0000:27:00.0",
-		pcieRootAttributeKey:   "pci0000:00",
-		"pciDeviceID":          "1251",
-		"productName":          "RBLN-CA25",
+		deviceTypeAttributeKey:    deviceTypeVfio,
+		partitionModeAttributeKey: "none",
+		pciBusIDAttributeKey:      "0000:27:00.0",
+		pcieRootAttributeKey:      "pci0000:00",
+		"pciDeviceID":             "1251",
+		"productName":             "RBLN-CA25",
 	}
 	for key, want := range wantString {
 		attr, ok := got.Attributes[key]
@@ -160,6 +170,7 @@ func TestEnumerateVfioDevices(t *testing.T) {
 
 	wantInt := map[resourceapi.QualifiedName]int64{
 		iommuGroupAttributeKey:     42,
+		numVFsAttributeKey:         0,
 		numaNodeAttributeKey:       0,
 		dranetNumaNodeAttributeKey: 0,
 	}
@@ -191,10 +202,14 @@ func TestEnumerateVfioDevicesCR13ProductName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dev := rblnVfioDevice("0000:27:00.0")
 			dev.device = tc.deviceID
-			dev.physfn = tc.vf
-			root := writeFakeSysfs(t, []fakePCIDevice{dev})
+			layout := []fakePCIDevice{dev}
+			if tc.vf {
+				layout[0].physfnOf = "0000:26:00.0"
+				layout = append(layout, nativeDevice("0000:26:00.0", "4"))
+			}
+			root := writeFakeSysfs(t, layout)
 
-			devices, err := enumerateVfioDevices(context.Background(), root)
+			devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -235,7 +250,7 @@ func TestEnumerateVfioDevicesFiltering(t *testing.T) {
 
 	root := writeFakeSysfs(t, []fakePCIDevice{rblnBound, otherVendor, otherClass, unbound, noIOMMU, wanted})
 
-	devices, err := enumerateVfioDevices(context.Background(), root)
+	devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,69 +263,48 @@ func TestEnumerateVfioDevicesFiltering(t *testing.T) {
 }
 
 func TestEnumerateVfioDevicesVirtualFunction(t *testing.T) {
-	vf := rblnVfioDevice("0000:27:00.1")
-	vf.physfn = true
-	root := writeFakeSysfs(t, []fakePCIDevice{vf})
-
-	devices, err := enumerateVfioDevices(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(devices) != 1 {
-		t.Fatalf("expected 1 device, got %d", len(devices))
-	}
-	if attr := devices[0].Attributes["vf"]; attr.BoolValue == nil || !*attr.BoolValue {
-		t.Errorf("attribute vf should be true for a virtual function")
+	for _, count := range []string{"1", "4"} {
+		t.Run("vf"+count, func(t *testing.T) {
+			pf := "0000:27:00.0"
+			root := writeFakeSysfs(t, []fakePCIDevice{nativeDevice(pf, count), vfioVF("0000:27:00.1", pf)})
+			devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
+			if err != nil || len(devices) != 1 {
+				t.Fatalf("enumeration = %v, %v", devices, err)
+			}
+			d := devices[0]
+			if deviceBoolAttr(d, vfAttributeKey) != true || deviceStringAttr(d, partitionModeAttributeKey) != "vf"+count ||
+				deviceStringAttr(d, parentPCIBusIDAttributeKey) != pf || deviceStringAttr(d, deviceTypeAttributeKey) != deviceTypeVfio {
+				t.Errorf("unexpected VF attributes: %v", d.Attributes)
+			}
+			wantCount := int64(1)
+			if count == "4" {
+				wantCount = 4
+			}
+			if deviceIntAttr(d, numVFsAttributeKey) != wantCount {
+				t.Errorf("numVFs = %v, want %d", deviceIntAttr(d, numVFsAttributeKey), wantCount)
+			}
+		})
 	}
 }
 
-func TestRescanVfioDevices(t *testing.T) {
-	root := writeFakeSysfs(t, []fakePCIDevice{rblnVfioDevice("0000:27:00.0")})
-
-	npuDevice := resourceapi.Device{
-		Name: "rbln0",
-		Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-			deviceTypeAttributeKey: {StringValue: ptr.To(deviceTypeNpu)},
-		},
+func TestEnumerateVfioDevicesExcludesUnsupportedSRIOV(t *testing.T) {
+	pf := "0000:27:00.0"
+	for _, count := range []string{"0", "2"} {
+		t.Run("parent count "+count, func(t *testing.T) {
+			root := writeFakeSysfs(t, []fakePCIDevice{nativeDevice(pf, count), vfioVF("0000:27:00.1", pf)})
+			devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
+			if err != nil || len(devices) != 0 {
+				t.Fatalf("enumeration = %v, %v", devices, err)
+			}
+		})
 	}
-
-	state := &DeviceState{
-		nodeName:            "node-1",
-		npuDevices:          []resourceapi.Device{npuDevice},
-		sysfsPCIDevicesRoot: root,
-	}
-	state.rebuildResources()
-
-	if len(state.allocatable) != 1 {
-		t.Fatalf("expected only the npu device before rescan, got %d", len(state.allocatable))
-	}
-
-	resources, changed, err := state.RescanVfioDevices(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("expected first rescan to report a change")
-	}
-	if len(state.allocatable) != 2 {
-		t.Fatalf("expected npu + vfio devices, got %d", len(state.allocatable))
-	}
-	if _, ok := state.allocatable["vfio-0000-27-00-0"]; !ok {
-		t.Error("vfio device missing from allocatable")
-	}
-	if _, ok := state.allocatable["rbln0"]; !ok {
-		t.Error("npu device missing from allocatable")
-	}
-	if got := len(resources.Pools["node-1"].Slices[0].Devices); got != 2 {
-		t.Errorf("expected 2 devices in published slice, got %d", got)
-	}
-
-	_, changed, err = state.RescanVfioDevices(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed {
-		t.Error("expected second rescan to report no change")
+	// Even if a hosting PF is bound to vfio-pci, it is not usable compute.
+	hostingPF := rblnVfioDevice(pf)
+	hostingPF.numVFs = "4"
+	root := writeFakeSysfs(t, []fakePCIDevice{hostingPF, vfioVF("0000:27:00.1", pf)})
+	devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
+	if err != nil || len(devices) != 1 || devices[0].Name != vfioDeviceName("0000:27:00.1")+"-vf4" {
+		t.Fatalf("hosting PF must be excluded: %v, %v", devices, err)
 	}
 }
 
@@ -349,17 +343,15 @@ func TestIsVfioDeviceAndIOMMUGroup(t *testing.T) {
 	}
 }
 
-// A vfio-pci bound NPU without an IOMMU group cannot be passed through and is
-// not advertised. Dropping it silently would leave a VM Pending with no record
-// naming the card, so the skip has to be a warn that names the device.
-func TestEnumerateVfioDevicesWarnsOnMissingIOMMUGroup(t *testing.T) {
+// Enumeration returns exclusion details; only the caller logs transitions.
+func TestEnumerateVfioDevicesReturnsMissingIOMMUGroupWithoutLogging(t *testing.T) {
 	buf := logtest.Capture(t, "info")
 
 	noIOMMU := rblnVfioDevice("0000:2b:00.0")
 	noIOMMU.iommuGroup = ""
 	root := writeFakeSysfs(t, []fakePCIDevice{noIOMMU})
 
-	devices, err := enumerateVfioDevices(context.Background(), root)
+	devices, skipped, err := enumerateVfioDevices(context.Background(), root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,55 +359,10 @@ func TestEnumerateVfioDevicesWarnsOnMissingIOMMUGroup(t *testing.T) {
 		t.Fatalf("device without IOMMU group was advertised: %v", devices)
 	}
 
-	line := logtest.Find(logtest.Lines(t, buf), "Skipping vfio-pci NPU without an IOMMU group")
-	if line == nil {
-		t.Fatalf("skipped device was not reported: %s", buf.String())
-	}
-	if line["level"] != "warn" {
-		t.Errorf("level = %v, want warn", line["level"])
-	}
-	if line["pciBusID"] != "0000:2b:00.0" {
-		t.Errorf("pciBusID = %v, want 0000:2b:00.0", line["pciBusID"])
-	}
-	if line["impact"] == nil {
-		t.Error("impact missing: the record must say the device is not published")
-	}
-}
-
-// The rescan ticker gives no other hint of when a passthrough device appeared
-// or vanished, so the change record has to name the delta.
-func TestRescanVfioDevicesLogsDelta(t *testing.T) {
-	buf := logtest.Capture(t, "info")
-	root := writeFakeSysfs(t, []fakePCIDevice{rblnVfioDevice("0000:27:00.0")})
-
-	state := &DeviceState{nodeName: "node-1", sysfsPCIDevicesRoot: root}
-	state.rebuildResources()
-
-	if _, changed, err := state.RescanVfioDevices(context.Background()); err != nil || !changed {
-		t.Fatalf("first rescan: changed=%v err=%v", changed, err)
-	}
-
-	line := logtest.Find(logtest.Lines(t, buf), "vfio-pci NPU devices changed, republishing resources")
-	if line == nil {
-		t.Fatalf("device change was not logged: %s", buf.String())
-	}
-	added, ok := line["added"].([]any)
-	if !ok || len(added) != 1 || added[0] != "vfio-0000-27-00-0" {
-		t.Errorf("added = %#v, want [vfio-0000-27-00-0]", line["added"])
-	}
-	if removed, ok := line["removed"].([]any); !ok || len(removed) != 0 {
-		t.Errorf("removed = %#v, want an empty list", line["removed"])
-	}
-	if line["vfioDeviceCount"] != float64(1) {
-		t.Errorf("vfioDeviceCount = %v, want 1", line["vfioDeviceCount"])
-	}
-
-	// An unchanged scan must stay silent: the loop runs every 30s.
-	buf.Reset()
-	if _, changed, err := state.RescanVfioDevices(context.Background()); err != nil || changed {
-		t.Fatalf("second rescan: changed=%v err=%v", changed, err)
+	if len(skipped) != 1 || skipped[0].pciBusID != noIOMMU.busID || !strings.Contains(skipped[0].reason(), "no IOMMU group") {
+		t.Fatalf("missing exclusion details: %+v", skipped)
 	}
 	if buf.Len() != 0 {
-		t.Errorf("unchanged rescan produced records: %s", buf.String())
+		t.Fatalf("enumeration must not log per-tick exclusions: %s", buf.String())
 	}
 }

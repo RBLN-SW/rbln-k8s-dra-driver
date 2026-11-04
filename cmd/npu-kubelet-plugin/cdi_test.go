@@ -15,7 +15,8 @@ import (
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 )
 
-const runtimeSpecFixture = `kind: rebellions.ai/npu
+const runtimeSpecFixture = `cdiVersion: 0.6.0
+kind: rebellions.ai/npu
 devices:
 - name: runtime
   containerEdits:

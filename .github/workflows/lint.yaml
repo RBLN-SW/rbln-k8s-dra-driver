@@ -11,6 +11,8 @@ jobs:
     runs-on: rbln-sw-k8s-general
     steps:
     - uses: actions/checkout@v7
+    - name: Set up Helm for DeviceClass selector tests
+      uses: azure/setup-helm@v5
     - name: Set up Go
       uses: actions/setup-go@v6
       with:

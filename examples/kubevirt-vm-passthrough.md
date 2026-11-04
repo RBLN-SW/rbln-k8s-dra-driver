@@ -1,8 +1,9 @@
 # KubeVirt VM with an NPU passed through via DRA
 
-On nodes with the `vm-passthrough` workload config, the NPU operator's
-vfio-manager binds Rebellions NPUs (PCI vendor `0x1eff`, class `0x120000`) to
-the `vfio-pci` driver. The kubelet plugin discovers those devices by scanning
+On nodes with the `vm-passthrough` workload config, usable Rebellions PCI
+functions (vendor `0x1eff`, class `0x120000`) are bound to `vfio-pci`.
+For PM-managed SR-IOV, the PF stays on `rebellions` and only its VFs bind to
+`vfio-pci`. The kubelet plugin discovers those devices by scanning
 `/sys/bus/pci/devices` and publishes them in the node's ResourceSlice as
 `vfio-<pci-address>` devices with `type: "vfio"`, alongside:
 
@@ -13,6 +14,9 @@ the `vfio-pci` driver. The kubelet plugin discovers those devices by scanning
 - `iommuGroup`, `pciDeviceID`, `productName`, `vf` — driver-specific
   attributes for selection and debugging (`productName` is only set for
   known models).
+- `partitionMode`, `numVFs`, `parentPCIBusID` — select `none`, `vf1` or
+  `vf4` and identify a VF's parent. Hosting PFs and unsupported or unreadable
+  VF partition modes are excluded.
 
 When a claim for a vfio device is prepared, the plugin injects
 `/dev/vfio/vfio` and `/dev/vfio/<iommu group>` into KubeVirt's virt-launcher
@@ -21,8 +25,14 @@ per-claim device metadata files (KEP-5304 style) that virt-launcher reads to
 discover the PCI address. The RBLN runtime (UMD) mounts used for container
 workloads are *not* applied to vfio claims.
 
-The `DeviceClass` named `vfio-npu.rebellions.ai` selects only passthrough
-devices.
+The `DeviceClass` named `vfio-npu.rebellions.ai` selects only whole PFs.
+To request one VF from a PF in VF4 mode, use the following `exactly` block
+(VF1 uses `vfio-npu-vf1.rebellions.ai`):
+
+```yaml
+deviceClassName: vfio-npu-vf4.rebellions.ai
+count: 1
+```
 
 ## Prerequisites
 
@@ -33,7 +43,8 @@ devices.
   `draKubeletPlugin.enabled: true`. `sandboxDevicePlugin` must stay disabled:
   the two advertise the same vfio devices, so the operator rejects a policy
   that enables both.
-- IOMMU enabled on the host (VM-based nodes need a vIOMMU).
+- IOMMU enabled on the host (VM-based nodes need a vIOMMU), with one PCI
+  function per allocated IOMMU group. Shared groups are not advertised.
 
 ## Apply
 
@@ -133,12 +144,34 @@ kubectl delete namespace npu-example-passthrough
 
 ## Notes
 
-- On vm-passthrough nodes the kubelet plugin crash-loops until vfio-manager
-  binds the first device — this is expected during bring-up.
-- vfio binding happens at runtime, so the plugin rescans every 30 seconds;
-  newly bound devices can take up to one interval to appear in the
-  ResourceSlice.
-- Devices without an IOMMU group cannot be passed through and are silently
-  not advertised.
+- A node starting without usable devices keeps scanning. The default
+  `DEVICE_SCAN_INTERVAL` is `5s`; successful scans publish inventory changes.
+- A failed scan preserves the last complete native/VFIO inventory. New
+  Prepare calls still check live PCI binding, profile and IOMMU ownership.
+- Devices without an exclusive IOMMU group are omitted. The exclusion reason
+  is logged at startup or when a device leaves the inventory.
 - Passthrough devices are not requestable through the `rebellions.ai/npu`
   extended resource — only through an explicit ResourceClaim.
+
+## SR-IOV hardware validation
+
+After PM converges a VF1 or VF4 layout, use the corresponding VFIO class in
+the template above. Create two VMs with different names referencing that
+template so each receives its own claim. Verify both VMs reach Running and
+inspect their allocated PCI addresses in ResourceSlices and the guests.
+The two claims must have distinct VF BDFs and distinct IOMMU groups.
+
+On the host, for each allocated VF:
+
+```bash
+VF_BDF=0000:17:00.1  # replace with the allocated VF's BDF
+readlink "/sys/bus/pci/devices/$VF_BDF/driver"
+readlink "/sys/bus/pci/devices/$VF_BDF/physfn"
+readlink "/sys/bus/pci/devices/$VF_BDF/iommu_group"
+ls -1 "/sys/bus/pci/devices/$VF_BDF/iommu_group/devices"
+```
+
+Expect `vfio-pci`, the native parent PF, and a group listing only that VF.
+Before testing a different profile, terminate both VMs and release their
+claims through the managed PM transition. Recreate the VMs with the new
+profile class; old VF identities must not satisfy the new profile.

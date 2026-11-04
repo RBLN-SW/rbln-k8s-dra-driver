@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	resourceapi "k8s.io/api/resource/v1"
@@ -18,21 +21,22 @@ import (
 // block on the device-node poll.
 func prepareStateFor(t *testing.T, rsdPath string) *DeviceState {
 	t.Helper()
-	cdi, err := NewCDIHandler(t.TempDir(), consts.DriverName, "npu")
-	if err != nil {
-		t.Fatalf("CDI handler: %v", err)
-	}
 	st := newTestState(t)
-	st.cdi = cdi
-	st.rsdGroupFn = func([]string) string { return rsdPath }
+	st.nodeName = "node-1"
+	st.sysfsPCIDevicesRoot = writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:4d:00.0", "0")})
+	st.cdi = cdiHandlerWithRuntimeSpec(t)
+	st.rsdGroupFn = func([]string) (string, error) { return rsdPath, nil }
 	st.allocatable = AllocatableDevices{
 		"null": {
 			Name: "null",
 			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-				pciBusIDAttributeKey: {StringValue: ptr.To("0000:4d:00.0")},
+				pciBusIDAttributeKey:       {StringValue: ptr.To("0000:4d:00.0")},
+				deviceTypeAttributeKey:     {StringValue: ptr.To(deviceTypeNpu)},
+				deviceNodeNameAttributeKey: {StringValue: ptr.To("null")},
 			},
 		},
 	}
+	(sriovInfo{}).setAttributes(st.allocatable["null"].Attributes)
 	return st
 }
 
@@ -54,32 +58,39 @@ func allocatedClaim() *resourceapi.ResourceClaim {
 	}
 }
 
-// An empty RSD group path makes applyConfig skip /dev/rsd0 entirely: the
-// container starts, the pod goes Ready, and multi-NPU peer communication is
-// broken with nothing in the log to say so. This is the component's core
-// invariant failing silently, so it has to be an error record.
-func TestPrepareDevicesLogsMissingRSDGroupAsError(t *testing.T) {
-	buf := logtest.Capture(t, "info")
-	st := prepareStateFor(t, "")
-
-	if _, err := st.prepareDevices(context.Background(), allocatedClaim()); err != nil {
-		t.Fatalf("prepareDevices: %v", err)
-	}
-
-	line := logtest.Find(logtest.Lines(t, buf), "RSD group creation returned no device path")
-	if line == nil {
-		t.Fatalf("missing RSD group was not reported: %s", buf.String())
-	}
-	if line["level"] != "error" {
-		t.Errorf("level = %v, want error", line["level"])
-	}
-	if line["busIDs"] == nil {
-		t.Errorf("busIDs missing: the operator needs to know which devices were grouped")
-	}
-	// The message alone reads like a transient failure; the record has to say
-	// the pod is Ready but degraded, because nothing else will.
-	if line["impact"] == nil {
-		t.Errorf("impact missing: the record must say what breaks for the workload")
+// Preparation must fail when its RSD group cannot be created.
+func TestPrepareRejectsFailedRSDGroup(t *testing.T) {
+	for _, deviceType := range []string{"npu", "npu-vf"} {
+		t.Run(deviceType, func(t *testing.T) {
+			for _, groupErr := range []error{nil, errors.New("group creation failed")} {
+				st := prepareStateFor(t, "")
+				st.allocatable["null"].Attributes[deviceTypeAttributeKey] = resourceapi.DeviceAttribute{StringValue: ptr.To(deviceType)}
+				st.rsdGroupFn = func([]string) (string, error) { return "", groupErr }
+				devices, err := st.Prepare(context.Background(), allocatedClaim())
+				if err == nil || !strings.Contains(err.Error(), "RSD group") || len(devices) != 0 {
+					t.Fatalf("Prepare = %v, %v; want no devices and RSD error", devices, err)
+				}
+				if groupErr != nil && !errors.Is(err, groupErr) {
+					t.Fatalf("RSD error lost: %v", err)
+				}
+				files, err := os.ReadDir(st.cdi.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, file := range files {
+					if strings.Contains(file.Name(), string(allocatedClaim().UID)) {
+						t.Fatalf("failed preparation wrote claim CDI file: %s", file.Name())
+					}
+				}
+				cp := newCheckpoint()
+				if err := st.checkpointManager.GetCheckpoint(DriverPluginCheckpointFile, cp); err != nil {
+					t.Fatal(err)
+				}
+				if len(cp.V1.PreparedClaims) != 0 {
+					t.Fatal("failed preparation must not be checkpointed as prepared")
+				}
+			}
+		})
 	}
 }
 
@@ -202,18 +213,32 @@ func TestDeviceNameDelta(t *testing.T) {
 	prev := []resourceapi.Device{dev("a"), dev("b")}
 	next := []resourceapi.Device{dev("b"), dev("c")}
 
-	added, removed := deviceNameDelta(prev, next)
+	added, removed, changed := deviceNameDelta(prev, next)
 	if len(added) != 1 || added[0] != "c" {
 		t.Errorf("added = %v, want [c]", added)
 	}
 	if len(removed) != 1 || removed[0] != "a" {
 		t.Errorf("removed = %v, want [a]", removed)
 	}
+	if len(changed) != 0 {
+		t.Errorf("changed = %v, want none", changed)
+	}
+
+	// Attribute updates on an unchanged identity do not appear in added/removed.
+	typed := func(name, deviceType string) resourceapi.Device {
+		return resourceapi.Device{Name: name, Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+			deviceTypeAttributeKey: {StringValue: ptr.To(deviceType)},
+		}}
+	}
+	_, _, changed = deviceNameDelta([]resourceapi.Device{typed("a", "npu"), dev("b")}, []resourceapi.Device{typed("a", "npu-vf"), dev("b")})
+	if len(changed) != 1 || changed[0] != "a" {
+		t.Errorf("changed = %v, want [a]", changed)
+	}
 
 	// Empty, not nil: the record should read "added":[] rather than null.
-	added, removed = deviceNameDelta(nil, nil)
-	if added == nil || removed == nil || len(added) != 0 || len(removed) != 0 {
-		t.Errorf("delta of nothing = %v/%v, want two empty slices", added, removed)
+	added, removed, changed = deviceNameDelta(nil, nil)
+	if added == nil || removed == nil || changed == nil || len(added) != 0 || len(removed) != 0 || len(changed) != 0 {
+		t.Errorf("delta of nothing = %v/%v/%v, want three empty slices", added, removed, changed)
 	}
 }
 

@@ -17,13 +17,49 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-const sysfsPCIDevicesRoot = "/sys/bus/pci/devices"
+const (
+	sysfsPCIDevicesRoot = "/sys/bus/pci/devices"
+	nativePCIDriverName = "rebellions"
+)
+
+// An entry disappearing during enumeration is an observed removal. A missing
+// required attribute on an existing entry is a failed read, not a removal.
+func pciEntryRemoved(devPath string, err error) bool {
+	if !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, statErr := os.Stat(devPath)
+	return errors.Is(statErr, os.ErrNotExist)
+}
+
+// Unknown vendors are outside the inventory. For a previously published NPU,
+// a failed vendor read is not evidence that the function has disappeared.
+func isRebellionsPCI(devPath string, known map[string]bool) (bool, error) {
+	vendor, err := readSysfsValue(devPath, "vendor")
+	if err != nil {
+		if known[strings.ToLower(filepath.Base(devPath))] && !pciEntryRemoved(devPath, err) {
+			return false, fmt.Errorf("read vendor for known NPU %s: %w", filepath.Base(devPath), err)
+		}
+		return false, nil
+	}
+	return strings.EqualFold(vendor, rblnPCIVendorID), nil
+}
+
+func readPCIDriver(devPath string) (string, error) {
+	driver, err := readSysfsLinkBase(devPath, "driver")
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} // unbound function
+	return driver, err
+}
 
 var pciAddressRegexp = regexp.MustCompile(`^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$`)
 
@@ -51,7 +87,7 @@ func readSysfsLinkBase(devPath, name string) (string, error) {
 // resolvePCIERootID resolves the PCIe root complex ("pci<domain>:<bus>") a
 // device hangs off of by walking the physical device path in sysfs.
 func resolvePCIERootID(root, busID string) (string, error) {
-	resolvedPath, err := filepath.EvalSymlinks(filepath.Join(root, busID))
+	resolvedPath, err := filepath.EvalSymlinks(filepath.Join(root, strings.ToLower(busID)))
 	if err != nil {
 		return "", err
 	}
