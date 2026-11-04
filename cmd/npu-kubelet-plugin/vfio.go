@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,8 +28,6 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/utils/ptr"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
-
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 )
 
 const (
@@ -57,16 +56,16 @@ var pciDeviceIDToProductName = map[string]string{
 }
 
 // enumerateVfioDevices lists the Rebellions NPUs bound to vfio-pci under the
-// sysfs PCI devices root. It runs at startup and on every rescan tick, so it
-// only logs conditions that drop a device; per-device detail is logged by the
-// callers when the set is first seen or changes.
-func enumerateVfioDevices(ctx context.Context, root string) ([]resourceapi.Device, error) {
+// sysfs PCI devices root. Skipped entries are returned for startup/change
+// logging by the caller; enumeration itself does not log exclusions.
+func enumerateVfioDevices(ctx context.Context, root string, known map[string]bool) ([]resourceapi.Device, []skippedDevice, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", root, err)
+		return nil, nil, fmt.Errorf("read %s: %w", root, err)
 	}
 
 	var devices []resourceapi.Device
+	var skipped []skippedDevice
 	for _, entry := range entries {
 		busID := entry.Name()
 		if !pciAddressRegexp.MatchString(busID) {
@@ -74,26 +73,52 @@ func enumerateVfioDevices(ctx context.Context, root string) ([]resourceapi.Devic
 		}
 		devPath := filepath.Join(root, busID)
 
-		if vendor, err := readSysfsValue(devPath, "vendor"); err != nil || vendor != rblnPCIVendorID {
+		matches, err := isRebellionsPCI(devPath, known)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !matches {
 			continue
 		}
-		if class, err := readSysfsValue(devPath, "class"); err != nil || class != npuPCIClassID {
+		driver, err := readPCIDriver(devPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		if driver != vfioPCIDriverName {
 			continue
 		}
-		if driver, err := readSysfsLinkBase(devPath, "driver"); err != nil || driver != vfioPCIDriverName {
+		class, err := readSysfsValue(devPath, "class")
+		if err != nil {
+			if pciEntryRemoved(devPath, err) {
+				continue
+			}
+			return nil, nil, err
+		}
+		if class != npuPCIClassID {
 			continue
 		}
 
 		name := vfioDeviceName(busID)
-
-		group, err := deviceIOMMUGroupFromSysfs(devPath)
+		sriov, err := probeSRIOV(root, busID)
 		if err != nil {
-			// A vfio device without an IOMMU group cannot be passed through,
-			// so it must not be advertised. Silently dropping it would leave a
-			// VM Pending with no record naming the card it wanted.
-			logging.FromContext(ctx).Warn("Skipping vfio-pci NPU without an IOMMU group",
-				"device", name, "pciBusID", busID, "err", err,
-				"impact", "device is not published for passthrough; check that the IOMMU is enabled")
+			if !errors.Is(err, errUnsupportedDevice) {
+				return nil, nil, err
+			}
+			skipped = append(skipped, skippedDevice{name: name, pciBusID: busID, err: err})
+			continue
+		}
+		if sriov.isHostingPF() {
+			skipped = append(skipped, skippedDevice{name: name, pciBusID: busID, sriov: sriov})
+			continue
+		}
+		name = sriov.deviceName(name)
+
+		group, err := isolatedIOMMUGroup(devPath, busID)
+		if err != nil {
+			if !errors.Is(err, errUnsupportedDevice) {
+				return nil, nil, err
+			}
+			skipped = append(skipped, skippedDevice{name: name, pciBusID: busID, err: err})
 			continue
 		}
 
@@ -123,8 +148,7 @@ func enumerateVfioDevices(ctx context.Context, root string) ([]resourceapi.Devic
 			setNumaNodeAttr(ctx, attrs, name, numa)
 		}
 
-		_, err = os.Lstat(filepath.Join(devPath, "physfn"))
-		attrs["vf"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(err == nil)}
+		sriov.setAttributes(attrs)
 
 		devices = append(devices, resourceapi.Device{
 			Name:       name,
@@ -132,7 +156,7 @@ func enumerateVfioDevices(ctx context.Context, root string) ([]resourceapi.Devic
 		})
 	}
 
-	return devices, nil
+	return devices, skipped, nil
 }
 
 func vfioDeviceName(busID string) string {
@@ -151,6 +175,26 @@ func deviceIOMMUGroupFromSysfs(devPath string) (int64, error) {
 	return group, nil
 }
 
+// The current allocation unit is one PCI function. Shared IOMMU groups need
+// a different allocation contract and cannot be handed to independent VMs.
+func isolatedIOMMUGroup(devPath, busID string) (int64, error) {
+	group, err := deviceIOMMUGroupFromSysfs(devPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("%w: no IOMMU group for %s", errUnsupportedDevice, busID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	members, err := os.ReadDir(filepath.Join(devPath, "iommu_group", "devices"))
+	if err != nil {
+		return 0, err
+	}
+	if len(members) != 1 || !strings.EqualFold(members[0].Name(), busID) {
+		return 0, fmt.Errorf("%w: IOMMU group %d is not exclusive to %s", errUnsupportedDevice, group, busID)
+	}
+	return group, nil
+}
+
 func isVfioDevice(device resourceapi.Device) bool {
 	attr, ok := device.Attributes[deviceTypeAttributeKey]
 	return ok && attr.StringValue != nil && *attr.StringValue == deviceTypeVfio
@@ -164,7 +208,7 @@ func deviceIOMMUGroup(device resourceapi.Device) (string, error) {
 	return strconv.FormatInt(*attr.IntValue, 10), nil
 }
 
-func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadataFiles []string) (*cdispec.ContainerEdits, error) {
+func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadataMounts []*cdispec.Mount) (*cdispec.ContainerEdits, error) {
 	group, err := deviceIOMMUGroup(device)
 	if err != nil {
 		return nil, err
@@ -183,20 +227,8 @@ func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadata
 			GID:         ptr.To(qemuGID),
 		})
 	}
-	// virt-launcher resolves the passthrough PCI address from KEP-5304
-	// metadata files (see kubevirt_metadata.go). KubeVirt does not mount
-	// those files itself, so expose them to the consuming container
-	// here. Only this claim's files are mounted — the base path holds
-	// every claim's metadata on the node, which must not leak across
-	// tenants. The container paths must mirror the host paths because
-	// KubeVirt assembles the full {base}/{subdir}/{claim}/{request} path
-	// when globbing.
-	for _, file := range metadataFiles {
-		edits.Mounts = append(edits.Mounts, &cdispec.Mount{
-			HostPath:      file,
-			ContainerPath: file,
-			Options:       []string{"ro", "bind"},
-		})
-	}
+	// Mount only this request's files. The host paths are claim-UID scoped;
+	// each container still sees the standard name/alias-based lookup paths.
+	edits.Mounts = append(edits.Mounts, metadataMounts...)
 	return edits, nil
 }

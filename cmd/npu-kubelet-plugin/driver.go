@@ -83,21 +83,22 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		"driverName", config.flags.driverName, "pool", config.flags.nodeName,
 		"deviceCount", len(state.allocatable),
 		"npuDeviceCount", len(state.npuDevices), "vfioDeviceCount", len(state.vfioDevices),
-		"vfioRescanInterval", config.flags.vfioRescanInterval.String())
+		"deviceScanInterval", config.flags.deviceScanInterval.String())
 
 	// Started after the startup record so the counts above are read before the
-	// rescan loop can start rewriting them.
-	if interval := config.flags.vfioRescanInterval; interval > 0 {
-		go driver.runVfioRescan(ctx, interval)
+	// scan loop can start rewriting them.
+	if interval := config.flags.deviceScanInterval; interval > 0 {
+		go driver.runDeviceScan(ctx, interval)
 	}
 
 	return driver, nil
 }
 
-// runVfioRescan republishes the ResourceSlice whenever the set of vfio-pci
-// bound NPUs changes. Only vfio devices are rescanned (see
-// DeviceState.RescanVfioDevices); a failed scan is retried on the next tick.
-func (d *driver) runVfioRescan(ctx context.Context, interval time.Duration) {
+// runDeviceScan republishes the ResourceSlice whenever the set of NPU
+// devices, native or vfio-pci bound, changes (see DeviceState.RescanDevices).
+// A failed scan keeps the last complete inventory, logs its own transition,
+// and is retried on the next tick.
+func (d *driver) runDeviceScan(ctx context.Context, interval time.Duration) {
 	logger := logging.FromContext(ctx)
 
 	ticker := time.NewTicker(interval)
@@ -110,19 +111,16 @@ func (d *driver) runVfioRescan(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 		}
 
-		resources, changed, err := d.state.RescanVfioDevices(ctx)
-		if err != nil {
-			logger.Error("Failed to rescan vfio-pci NPU devices", "err", err,
-				"impact", "published passthrough devices may be stale until the next rescan succeeds")
-			continue
-		}
-		if !changed {
+		start := time.Now()
+		resources, changed, err := d.state.RescanDevices(ctx)
+		d.state.observeScanDuration(ctx, time.Since(start), interval)
+		if err != nil || !changed {
 			continue
 		}
 
 		if err := d.helper.PublishResources(ctx, resources); err != nil {
-			logger.Error("Failed to publish resources after vfio-pci rescan", "err", err,
-				"impact", "the ResourceSlice does not reflect the current passthrough devices")
+			logger.Error("Failed to publish resources after device scan", "err", err,
+				"impact", "the ResourceSlice does not reflect the current devices")
 		}
 	}
 }

@@ -18,33 +18,25 @@ import (
 	"strings"
 
 	resourceapi "k8s.io/api/resource/v1"
+	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
 
-// KubeVirt's virt-launcher discovers the PCI address of DRA-allocated host
-// devices by reading KEP-5304 style metadata files from a node-local
-// directory (see kubevirt pkg/dra/utils.go). KEP-5304 has not landed in the
-// kubelet yet, so publishing these files is the DRA driver's job:
+// The container lookup paths are part of the device metadata contract:
 //
 //	Template claims: {base}/resourceclaimtemplates/{podClaimName}/{request}/{driver}-metadata.json
 //	Direct claims:   {base}/resourceclaims/{claimName}/{request}/{driver}-metadata.json
 //
-// The files are not mounted into virt-launcher by KubeVirt either; the
-// prepare path injects a read-only CDI mount of each metadata file alongside
-// the vfio device nodes.
+// Host storage is separate: pod aliases and claim names are not unique on
+// a node. Each claim UID owns one host file per request, mounted read-only
+// at the lookup paths inside each consuming container.
 const (
 	kubevirtMetadataBasePath    = "/var/run/kubernetes.io/dra-device-attributes"
 	kubevirtMetadataAPIVersion  = "metadata.resource.k8s.io/v1alpha1"
 	kubevirtMetadataKind        = "DeviceMetadata"
 	resourceClaimsSubdir        = "resourceclaims"
 	resourceClaimTemplateSubdir = "resourceclaimtemplates"
-	// The claim directory is keyed by a name that is NOT unique on the node
-	// (pod-level claim name, or claim name without namespace) — that is
-	// KubeVirt's contract and cannot be changed on the writer side. The
-	// owner marker records which claim UID holds the directory so a
-	// colliding Prepare fails loudly instead of silently corrupting, and
-	// Unprepare never removes a directory another claim has taken over.
-	// virt-launcher globs only {claimDir}/{request}/*-metadata.json, so the
-	// marker at claim level is invisible to it.
+	// Keep the owner marker and directory depth compatible with older cleanup
+	// code, including when rolling back with newly prepared claims on disk.
 	kubevirtMetadataOwnerFile = ".claim-uid"
 	// Set by kube-controller-manager on claims generated from a
 	// ResourceClaimTemplate; absent on directly-created claims.
@@ -72,18 +64,23 @@ type kubevirtMetadataDevice struct {
 	Attributes map[resourceapi.QualifiedName]resourceapi.DeviceAttribute `json:"attributes,omitempty"`
 }
 
-// kubevirtMetadataClaimDirs returns every directory KubeVirt may resolve for
-// this claim. virt-launcher picks the layout by how the consuming pod
-// references the claim, not by how the claim was created: a template-generated
+// kubevirtMetadataContainerDirs returns the container lookup directories.
+// The layout follows how the consuming pod references the claim: a generated
 // claim consumed directly via resourceClaimName is looked up under
 // resourceclaims/{claimName}. Template-generated claims therefore get both
 // layouts (they always also carry a real claim name).
-func kubevirtMetadataClaimDirs(basePath string, claim *resourceapi.ResourceClaim) []string {
+func kubevirtMetadataContainerDirs(basePath string, claim *resourceapi.ResourceClaim) []string {
 	dirs := []string{filepath.Join(basePath, resourceClaimsSubdir, claim.Name)}
 	if podClaimName, ok := claim.Annotations[podClaimNameAnnotation]; ok && podClaimName != "" {
 		dirs = append(dirs, filepath.Join(basePath, resourceClaimTemplateSubdir, podClaimName))
 	}
 	return dirs
+}
+
+func kubevirtMetadataHostDir(basePath, claimUID string) string {
+	// A leading dot cannot occur in a legacy Kubernetes claim name or pod
+	// alias. Retaining the old parent lets older binaries clean up by UID.
+	return filepath.Join(basePath, resourceClaimsSubdir, ".uid-"+claimUID)
 }
 
 // A firstAvailable subrequest is reported as "<mainRequest>/<subRequest>", but
@@ -98,14 +95,17 @@ func kubevirtMetadataFilePath(claimDir, requestName, driverName string) string {
 	return filepath.Join(claimDir, requestName, driverName+"-metadata.json")
 }
 
-// kubevirtMetadataFiles returns the files writeKubeVirtMetadata publishes for
-// requestName, one per layout; the prepare path bind-mounts exactly these.
-func kubevirtMetadataFiles(basePath string, claim *resourceapi.ResourceClaim, driverName, requestName string) []string {
-	var files []string
-	for _, claimDir := range kubevirtMetadataClaimDirs(basePath, claim) {
-		files = append(files, kubevirtMetadataFilePath(claimDir, requestName, driverName))
+func kubevirtMetadataMounts(basePath string, claim *resourceapi.ResourceClaim, driverName, requestName string) []*cdispec.Mount {
+	hostPath := kubevirtMetadataFilePath(kubevirtMetadataHostDir(basePath, string(claim.UID)), requestName, driverName)
+	var mounts []*cdispec.Mount
+	for _, claimDir := range kubevirtMetadataContainerDirs(basePath, claim) {
+		mounts = append(mounts, &cdispec.Mount{
+			HostPath:      hostPath,
+			ContainerPath: kubevirtMetadataFilePath(claimDir, requestName, driverName),
+			Options:       []string{"ro", "bind"},
+		})
 	}
-	return files
+	return mounts
 }
 
 func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, driverName string, allocatable AllocatableDevices) error {
@@ -133,47 +133,42 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 		})
 	}
 
-	// Ownership is claimed per layout right before writing into it. On a
-	// collision (or any later error) the caller rolls back by claim UID via
-	// removeKubeVirtMetadataForClaim, which finds everything written here —
-	// markers included — by scanning, so nothing needs to be tracked.
-	for _, claimDir := range kubevirtMetadataClaimDirs(basePath, claim) {
-		if err := claimMetadataOwnership(claimDir, string(claim.UID)); err != nil {
-			return err
+	claimDir := kubevirtMetadataHostDir(basePath, string(claim.UID))
+	if err := claimMetadataOwnership(claimDir, string(claim.UID)); err != nil {
+		return err
+	}
+	for requestName, devices := range devicesByRequest {
+		path := kubevirtMetadataFilePath(claimDir, requestName, driverName)
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create metadata dir %s: %w", dir, err)
 		}
-		for requestName, devices := range devicesByRequest {
-			path := kubevirtMetadataFilePath(claimDir, requestName, driverName)
-			dir := filepath.Dir(path)
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create metadata dir %s: %w", dir, err)
-			}
 
-			meta := kubevirtDeviceMetadata{
-				APIVersion:   kubevirtMetadataAPIVersion,
-				Kind:         kubevirtMetadataKind,
-				PodClaimName: podClaimName,
-				Requests: []kubevirtDeviceMetadataRequest{
-					{Name: requestName, Devices: devices},
-				},
-			}
-			data, err := json.Marshal(meta)
-			if err != nil {
-				return fmt.Errorf("marshal metadata for request %s: %w", requestName, err)
-			}
+		meta := kubevirtDeviceMetadata{
+			APIVersion:   kubevirtMetadataAPIVersion,
+			Kind:         kubevirtMetadataKind,
+			PodClaimName: podClaimName,
+			Requests: []kubevirtDeviceMetadataRequest{
+				{Name: requestName, Devices: devices},
+			},
+		}
+		data, err := json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("marshal metadata for request %s: %w", requestName, err)
+		}
 
-			tmp := path + ".tmp"
-			if err := os.WriteFile(tmp, data, 0o644); err != nil {
-				return fmt.Errorf("write metadata %s: %w", tmp, err)
-			}
-			if err := os.Rename(tmp, path); err != nil {
-				return fmt.Errorf("publish metadata %s: %w", path, err)
-			}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, data, 0o644); err != nil {
+			return fmt.Errorf("write metadata %s: %w", tmp, err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return fmt.Errorf("publish metadata %s: %w", path, err)
 		}
 	}
 	return nil
 }
 
-// claimMetadataOwnership claims the name-keyed directory for claimUID, or
+// claimMetadataOwnership claims the directory for claimUID, or
 // fails if another live claim already holds it. A directory without a marker
 // (pre-marker driver versions, or an interrupted write) is adopted.
 func claimMetadataOwnership(claimDir, claimUID string) error {
@@ -194,7 +189,8 @@ func claimMetadataOwnership(claimDir, claimUID string) error {
 }
 
 // removeKubeVirtMetadataForClaim removes every metadata directory owned by
-// claimUID, discovering them by scanning the on-disk owner markers. Keeping
+// claimUID, including both legacy name-keyed and UID-keyed directories,
+// discovering them by scanning the on-disk owner markers. Keeping
 // cleanup state on disk instead of in the checkpoint keeps the checkpoint
 // schema identical to pre-vfio drivers (see checkpoint.go). Directories
 // whose marker names another claim are left untouched.
