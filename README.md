@@ -153,6 +153,20 @@ See [a Pod requesting one VF](examples/single-pod-npu-vf4.md) for a runnable
 ResourceClaimTemplate example. VFIO claims use the existing passthrough CDI
 path and do not require the native runtime or an RSD group.
 
+VFIO metadata is stored on the host under
+`/var/run/kubernetes.io/dra-device-attributes/resourceclaims/.uid-<claimUID>/`.
+Each request's file is bind-mounted read-only at the existing name/alias-based
+container paths. Multiple VMs can reuse the same template and pod claim alias,
+and direct claims in different namespaces can share a name. DeviceClass names,
+device names, request names and the metadata JSON schema are unchanged.
+
+Already prepared claims retain their checkpointed CDI mounts and legacy files
+until Unprepare. The checkpoint remains V1. Owner markers and directory depth
+are preserved so both current and older cleanup code can remove UID-scoped
+files. Downgrading still restores the older collision behavior for newly
+prepared claims; host-side scripts that inspect metadata should use the CDI
+mount source rather than assume a claim-name directory.
+
 The checkpoint format remains V1. RSD creation uses `rblnlib-go` v0.3.0.
 For all native NPU claims, including PFs and VFs, an RSD creation error or an
 empty returned device path fails Prepare and leaves the Pod waiting for
@@ -276,7 +290,7 @@ stamped from the release tag. A plain `make cmds` with no `VERSION` reports
 | Devices seem leaked after a pod is gone | `Unprepared devices for claim`, or `No prepared state for claim` at `debug` |
 | Topology-aware allocation behaves oddly | `Ignoring unparseable NUMA node` (warn), `Device reports no NUMA affinity` at `debug` |
 | Cross-driver `matchAttribute` on `pcieRoot` never matches | `Ignoring unresolvable PCIe root` (warn); the attribute is resolved from sysfs, so check `/sys` is visible to the plugin |
-| A VM's claim fails with "metadata directory ... is owned by claim" | Another live claim with the same name holds the KubeVirt metadata directory; `Failed to roll back KubeVirt device metadata` (warn) explains a leftover from an earlier failed prepare |
+| A VM's claim fails with "metadata directory ... is owned by claim" | Inspect the owner marker for unexpected or stale state; ordinary name/alias reuse is isolated by claim UID. `Failed to roll back KubeVirt device metadata` reports unsuccessful cleanup. |
 
 ## Usage Examples
 

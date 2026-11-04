@@ -472,12 +472,12 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 
 		vfio := isVfioDevice(s.allocatable[result.Device])
 		if vfio {
-			var metadataFiles []string
+			var metadataMounts []*cdispec.Mount
 			if requestName := kubevirtMetadataRequestName(result); !metadataMounted[requestName] {
-				metadataFiles = kubevirtMetadataFiles(kubevirtMetadataBasePath, claim, s.driverName, requestName)
+				metadataMounts = kubevirtMetadataMounts(kubevirtMetadataBasePath, claim, s.driverName, requestName)
 				metadataMounted[requestName] = true
 			}
-			edits, err = vfioContainerEdits(ctx, s.allocatable[result.Device], metadataFiles)
+			edits, err = vfioContainerEdits(ctx, s.allocatable[result.Device], metadataMounts)
 		} else {
 			edits, err = s.applyConfig(ctx, result.Device, hostRsdPath)
 		}
