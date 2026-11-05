@@ -306,3 +306,9 @@ this repository no longer keeps a separate legacy Buildkite PR pipeline.
 
 Release candidates are tested through RNPM using their published images.
 See [RC validation setup and image inputs](docs/rc-validation.md).
+
+The gRPC health service exposes `readiness` in addition to `liveness`. Readiness
+requires kubelet registration acknowledgement as well as working plugin RPCs.
+It does not assert that asynchronous ResourceSlice publication has completed;
+partition-manager checks the published inventory before releasing its cordon.
+Use a matching image when enabling the chart/operator readinessProbe.
