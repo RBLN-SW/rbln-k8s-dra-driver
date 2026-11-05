@@ -38,6 +38,7 @@ import (
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	"github.com/rbln-sw/rblnlib-go/pkg/device"
 )
@@ -70,7 +71,6 @@ const (
 
 type DeviceState struct {
 	sync.Mutex
-	driverName        string
 	nodeName          string
 	cdi               *CDIHandler
 	driverResources   resourceslice.DriverResources
@@ -162,7 +162,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 			"parentPCIBusID", deviceStringAttr(d, parentPCIBusIDAttributeKey), "numVFs", deviceIntAttr(d, numVFsAttributeKey))
 	}
 
-	cdi, err := NewCDIHandler(config.flags.cdiRoot, config.flags.driverName, "npu")
+	cdi, err := NewCDIHandler(config.flags.cdiRoot, "npu")
 	if err != nil {
 		return nil, fmt.Errorf("unable to create CDI handler: %w", err)
 	}
@@ -173,7 +173,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 
 	state := &DeviceState{
-		driverName:          config.flags.driverName,
 		nodeName:            config.flags.nodeName,
 		cdi:                 cdi,
 		checkpointManager:   checkpointManager,
@@ -298,7 +297,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	// otherwise never be collected, because Unprepare no-ops for claims the
 	// checkpoint does not record.
 	if s.claimHasVfioDevice(claim) {
-		if err := writeKubeVirtMetadata(kubevirtMetadataBasePath, claim, s.driverName, s.allocatable); err != nil {
+		if err := writeKubeVirtMetadata(kubevirtMetadataBasePath, claim, s.allocatable); err != nil {
 			s.rollbackKubeVirtMetadata(ctx, claimUID)
 			return nil, fmt.Errorf("unable to write KubeVirt device metadata: %w", err)
 		}
@@ -336,7 +335,7 @@ func (s *DeviceState) claimHasVfioDevice(claim *resourceapi.ResourceClaim) bool 
 		return false
 	}
 	for _, result := range claim.Status.Allocation.Devices.Results {
-		if result.Driver != s.driverName {
+		if result.Driver != consts.DriverName {
 			continue
 		}
 		if device, ok := s.allocatable[result.Device]; ok && isVfioDevice(device) {
@@ -402,7 +401,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	var results []*resourceapi.DeviceRequestAllocationResult
 	for i := range claim.Status.Allocation.Devices.Results {
 		result := &claim.Status.Allocation.Devices.Results[i]
-		if result.Driver != s.driverName {
+		if result.Driver != consts.DriverName {
 			continue
 		}
 		allocated, exists := s.allocatable[result.Device]
@@ -474,7 +473,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		if vfio {
 			var metadataMounts []*cdispec.Mount
 			if requestName := kubevirtMetadataRequestName(result); !metadataMounted[requestName] {
-				metadataMounts = kubevirtMetadataMounts(kubevirtMetadataBasePath, claim, s.driverName, requestName)
+				metadataMounts = kubevirtMetadataMounts(kubevirtMetadataBasePath, claim, requestName)
 				metadataMounted[requestName] = true
 			}
 			edits, err = vfioContainerEdits(ctx, s.allocatable[result.Device], metadataMounts)

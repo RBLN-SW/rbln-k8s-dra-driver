@@ -34,6 +34,7 @@ import (
 	drapb "k8s.io/kubelet/pkg/apis/dra/v1"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 )
 
@@ -66,7 +67,7 @@ func startHealthcheck(ctx context.Context, config *Config, registered func() boo
 		Scheme: "unix",
 		// TODO: this needs to adapt when seamless upgrades
 		// are enabled and the filename includes a uid.
-		Path: path.Join(config.flags.kubeletRegistrarDirectoryPath, config.flags.driverName+"-reg.sock"),
+		Path: path.Join(config.flags.kubeletRegistrarDirectoryPath, consts.DriverName+"-reg.sock"),
 	}).String()
 	regConn, err := grpc.NewClient(
 		regSockPath,

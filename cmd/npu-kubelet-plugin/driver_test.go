@@ -13,7 +13,6 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/internal/logtest"
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 )
 
 // newTestState builds a DeviceState with only the checkpoint machinery wired.
@@ -28,7 +27,7 @@ func newTestState(t *testing.T) *DeviceState {
 	if err := cm.CreateCheckpoint(DriverPluginCheckpointFile, newCheckpoint()); err != nil {
 		t.Fatalf("create checkpoint: %v", err)
 	}
-	return &DeviceState{driverName: consts.DriverName, checkpointManager: cm}
+	return &DeviceState{checkpointManager: cm}
 }
 
 // A prepare failure is returned to kubelet but, until now, never logged by the

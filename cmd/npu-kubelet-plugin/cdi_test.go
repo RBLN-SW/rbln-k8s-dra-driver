@@ -12,7 +12,6 @@ import (
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/internal/logtest"
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 )
 
 const runtimeSpecFixture = `cdiVersion: 0.6.0
@@ -37,7 +36,7 @@ func cdiHandlerWithRuntimeSpec(t *testing.T) *CDIHandler {
 	if err := os.WriteFile(filepath.Join(root, rblnRuntimeSpecFile), []byte(runtimeSpecFixture), 0o600); err != nil {
 		t.Fatalf("write runtime spec fixture: %v", err)
 	}
-	cdi, err := NewCDIHandler(root, consts.DriverName, "npu")
+	cdi, err := NewCDIHandler(root, "npu")
 	if err != nil {
 		t.Fatalf("CDI handler: %v", err)
 	}
@@ -214,7 +213,7 @@ func TestGetRDSDeviceNodes(t *testing.T) {
 // runtime's UMD mounts and hooks, which a passthrough-only node does not have
 // and a virt-launcher container must not receive.
 func TestGetClaimDevicesIncludesCommonOnlyForNpu(t *testing.T) {
-	cdi, err := NewCDIHandler(t.TempDir(), consts.DriverName, "npu")
+	cdi, err := NewCDIHandler(t.TempDir(), "npu")
 	if err != nil {
 		t.Fatalf("CDI handler: %v", err)
 	}

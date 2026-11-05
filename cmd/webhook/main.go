@@ -35,10 +35,9 @@ import (
 )
 
 type Flags struct {
-	certFile   string
-	keyFile    string
-	port       int
-	driverName string
+	certFile string
+	keyFile  string
+	port     int
 }
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -77,12 +76,6 @@ func newApp(logLevel, logFormat string) *cli.App {
 			Value:       443,
 			Destination: &flags.port,
 		},
-		&cli.StringFlag{
-			Name:        "driver-name",
-			Usage:       "Name of the DRA driver.",
-			Destination: &flags.driverName,
-			EnvVars:     []string{"DRIVER_NAME"},
-		},
 	}
 	app := &cli.App{
 		Name:            "webhook",
@@ -97,11 +90,7 @@ func newApp(logLevel, logFormat string) *cli.App {
 			return nil
 		},
 		Action: func(c *cli.Context) error {
-			if flags.driverName == "" {
-				flags.driverName = consts.DriverName
-			}
-
-			mux, err := newMux(flags.driverName)
+			mux, err := newMux()
 			if err != nil {
 				return fmt.Errorf("create HTTP mux: %w", err)
 			}
@@ -117,7 +106,7 @@ func newApp(logLevel, logFormat string) *cli.App {
 				ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 			}
 			slog.Info("Starting webhook server",
-				"version", version, "addr", server.Addr, "driverName", flags.driverName,
+				"version", version, "addr", server.Addr, "driverName", consts.DriverName,
 				"logLevel", logLevel, "logFormat", logFormat)
 			return server.ListenAndServeTLS(flags.certFile, flags.keyFile)
 		},
@@ -126,9 +115,9 @@ func newApp(logLevel, logFormat string) *cli.App {
 	return app
 }
 
-func newMux(driverName string) (*http.ServeMux, error) {
+func newMux() (*http.ServeMux, error) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/validate-resource-claim-parameters", serveResourceClaim(driverName))
+	mux.HandleFunc("/validate-resource-claim-parameters", serveResourceClaim())
 	mux.HandleFunc("/readyz", readyHandler)
 	return mux, nil
 }
@@ -141,9 +130,9 @@ func readyHandler(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func serveResourceClaim(driverName string) func(http.ResponseWriter, *http.Request) {
+func serveResourceClaim() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serve(w, r, admitResourceClaimParameters(driverName))
+		serve(w, r, admitResourceClaimParameters())
 	}
 }
 
@@ -233,7 +222,7 @@ func readAdmissionReview(data []byte) (*admissionv1.AdmissionReview, error) {
 	return requestedAdmissionReview, nil
 }
 
-func admitResourceClaimParameters(_ string) func(ctx context.Context, ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func admitResourceClaimParameters() func(ctx context.Context, ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	return func(ctx context.Context, ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 		logger := logging.FromContext(ctx)
 

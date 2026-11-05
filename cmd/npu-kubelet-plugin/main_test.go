@@ -3,6 +3,8 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,25 @@ func TestNewAppRunsHelp(t *testing.T) {
 	app.Writer = io.Discard
 	if err := app.Run([]string{"npu-kubelet-plugin", "--help"}); err != nil {
 		t.Fatalf("--help: %v", err)
+	}
+}
+
+func TestDriverNameOverrideRejected(t *testing.T) {
+	app := newApp()
+	app.Writer = io.Discard
+	app.ErrWriter = io.Discard
+	err := app.Run([]string{"npu-kubelet-plugin", "--driver-name=npu.example.com"})
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -driver-name") {
+		t.Fatalf("removed driver-name flag: %v", err)
+	}
+}
+
+func TestDriverPluginPathIgnoresLegacyEnvironment(t *testing.T) {
+	t.Setenv("DRIVER_NAME", "npu.example.com")
+	root := t.TempDir()
+	config := Config{flags: &Flags{kubeletPluginsDirectoryPath: root}}
+	if got, want := config.DriverPluginPath(), filepath.Join(root, "npu.rebellions.ai"); got != want {
+		t.Fatalf("plugin data path = %q, want %q", got, want)
 	}
 }
 
