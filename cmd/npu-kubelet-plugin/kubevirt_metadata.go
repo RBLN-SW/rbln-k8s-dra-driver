@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	resourceapi "k8s.io/api/resource/v1"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
@@ -91,24 +92,24 @@ func kubevirtMetadataRequestName(result *resourceapi.DeviceRequestAllocationResu
 	return requestName
 }
 
-func kubevirtMetadataFilePath(claimDir, requestName, driverName string) string {
-	return filepath.Join(claimDir, requestName, driverName+"-metadata.json")
+func kubevirtMetadataFilePath(claimDir, requestName string) string {
+	return filepath.Join(claimDir, requestName, consts.DriverName+"-metadata.json")
 }
 
-func kubevirtMetadataMounts(basePath string, claim *resourceapi.ResourceClaim, driverName, requestName string) []*cdispec.Mount {
-	hostPath := kubevirtMetadataFilePath(kubevirtMetadataHostDir(basePath, string(claim.UID)), requestName, driverName)
+func kubevirtMetadataMounts(basePath string, claim *resourceapi.ResourceClaim, requestName string) []*cdispec.Mount {
+	hostPath := kubevirtMetadataFilePath(kubevirtMetadataHostDir(basePath, string(claim.UID)), requestName)
 	var mounts []*cdispec.Mount
 	for _, claimDir := range kubevirtMetadataContainerDirs(basePath, claim) {
 		mounts = append(mounts, &cdispec.Mount{
 			HostPath:      hostPath,
-			ContainerPath: kubevirtMetadataFilePath(claimDir, requestName, driverName),
+			ContainerPath: kubevirtMetadataFilePath(claimDir, requestName),
 			Options:       []string{"ro", "bind"},
 		})
 	}
 	return mounts
 }
 
-func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, driverName string, allocatable AllocatableDevices) error {
+func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, allocatable AllocatableDevices) error {
 	var podClaimName *string
 	if v, ok := claim.Annotations[podClaimNameAnnotation]; ok && v != "" {
 		podClaimName = &v
@@ -117,7 +118,7 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 	devicesByRequest := map[string][]kubevirtMetadataDevice{}
 	for i := range claim.Status.Allocation.Devices.Results {
 		result := &claim.Status.Allocation.Devices.Results[i]
-		if result.Driver != driverName {
+		if result.Driver != consts.DriverName {
 			continue
 		}
 		device, ok := allocatable[result.Device]
@@ -126,7 +127,7 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 		}
 		requestName := kubevirtMetadataRequestName(result)
 		devicesByRequest[requestName] = append(devicesByRequest[requestName], kubevirtMetadataDevice{
-			Driver:     driverName,
+			Driver:     consts.DriverName,
 			Pool:       result.Pool,
 			Name:       result.Device,
 			Attributes: device.Attributes,
@@ -138,7 +139,7 @@ func writeKubeVirtMetadata(basePath string, claim *resourceapi.ResourceClaim, dr
 		return err
 	}
 	for requestName, devices := range devicesByRequest {
-		path := kubevirtMetadataFilePath(claimDir, requestName, driverName)
+		path := kubevirtMetadataFilePath(claimDir, requestName)
 		dir := filepath.Dir(path)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create metadata dir %s: %w", dir, err)

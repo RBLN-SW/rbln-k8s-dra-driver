@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,7 +58,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		driver,
 		kubeletplugin.KubeClient(config.coreclient),
 		kubeletplugin.NodeName(config.flags.nodeName),
-		kubeletplugin.DriverName(config.flags.driverName),
+		kubeletplugin.DriverName(consts.DriverName),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
 		kubeletplugin.GRPCInterceptor(driver.observeRegistration),
@@ -84,7 +85,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// not that the ResourceSlice exists yet — a rejected write arrives later
 	// through HandleError.
 	logging.FromContext(ctx).Info("Driver started",
-		"driverName", config.flags.driverName, "pool", config.flags.nodeName,
+		"driverName", consts.DriverName, "pool", config.flags.nodeName,
 		"deviceCount", len(state.allocatable),
 		"npuDeviceCount", len(state.npuDevices), "vfioDeviceCount", len(state.vfioDevices),
 		"deviceScanInterval", config.flags.deviceScanInterval.String())

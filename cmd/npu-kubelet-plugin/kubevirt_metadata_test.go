@@ -64,13 +64,13 @@ func TestWriteKubeVirtMetadataTemplateClaim(t *testing.T) {
 	base := t.TempDir()
 	claim := testClaim(map[string]string{podClaimNameAnnotation: "npu-claim"})
 
-	if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, claim, testAllocatable()); err != nil {
 		t.Fatalf("writeKubeVirtMetadata: %v", err)
 	}
 
 	templatePath := metadataPath(base, "resourceclaimtemplates", "npu-claim", "npu")
 	directPath := metadataPath(base, "resourceclaims", claim.Name, "npu")
-	mounts := kubevirtMetadataMounts(base, claim, "npu.rebellions.ai", "npu")
+	mounts := kubevirtMetadataMounts(base, claim, "npu")
 	if len(mounts) != 2 || mounts[0].ContainerPath != directPath || mounts[1].ContainerPath != templatePath {
 		t.Fatalf("container lookup paths changed: %+v", mounts)
 	}
@@ -118,11 +118,11 @@ func TestWriteKubeVirtMetadataFirstAvailableSubrequest(t *testing.T) {
 	claim := testClaim(map[string]string{podClaimNameAnnotation: "npu-claim"})
 	claim.Status.Allocation.Devices.Results[0].Request = "npu/ca25"
 
-	if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, claim, testAllocatable()); err != nil {
 		t.Fatalf("writeKubeVirtMetadata: %v", err)
 	}
 
-	mounts := kubevirtMetadataMounts(base, claim, "npu.rebellions.ai", kubevirtMetadataRequestName(&claim.Status.Allocation.Devices.Results[0]))
+	mounts := kubevirtMetadataMounts(base, claim, kubevirtMetadataRequestName(&claim.Status.Allocation.Devices.Results[0]))
 	if mounts[1].ContainerPath != metadataPath(base, "resourceclaimtemplates", "npu-claim", "npu") {
 		t.Fatal("firstAvailable container path changed")
 	}
@@ -145,10 +145,10 @@ func TestWriteKubeVirtMetadataDirectClaim(t *testing.T) {
 	base := t.TempDir()
 	claim := testClaim(nil)
 
-	if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, claim, testAllocatable()); err != nil {
 		t.Fatalf("writeKubeVirtMetadata: %v", err)
 	}
-	mounts := kubevirtMetadataMounts(base, claim, "npu.rebellions.ai", "npu")
+	mounts := kubevirtMetadataMounts(base, claim, "npu")
 	if len(mounts) != 1 || mounts[0].ContainerPath != metadataPath(base, "resourceclaims", claim.Name, "npu") {
 		t.Fatal("direct claim container path changed")
 	}
@@ -164,7 +164,7 @@ func TestRemoveKubeVirtMetadataForClaim(t *testing.T) {
 	base := t.TempDir()
 	claim := testClaim(map[string]string{podClaimNameAnnotation: "npu-claim"})
 
-	if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, claim, testAllocatable()); err != nil {
 		t.Fatalf("writeKubeVirtMetadata: %v", err)
 	}
 	if err := removeKubeVirtMetadataForClaim(base, string(claim.UID)); err != nil {
@@ -185,10 +185,10 @@ func TestKubeVirtMetadataClaimsWithSameAliasAreIsolated(t *testing.T) {
 	base := t.TempDir()
 	claimA := testClaim(map[string]string{podClaimNameAnnotation: "npu-claim"})
 
-	if err := writeKubeVirtMetadata(base, claimA, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, claimA, testAllocatable()); err != nil {
 		t.Fatalf("writeKubeVirtMetadata(A): %v", err)
 	}
-	pathA := kubevirtMetadataMounts(base, claimA, "npu.rebellions.ai", "npu")[0].HostPath
+	pathA := kubevirtMetadataMounts(base, claimA, "npu")[0].HostPath
 	before, err := os.ReadFile(pathA)
 	if err != nil {
 		t.Fatal(err)
@@ -202,11 +202,11 @@ func TestKubeVirtMetadataClaimsWithSameAliasAreIsolated(t *testing.T) {
 	allocatedB := AllocatableDevices{"vfio-0000-24-00-0": {Name: "vfio-0000-24-00-0", Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		pciBusIDAttributeKey: {StringValue: ptr.To("0000:24:00.0")}, deviceTypeAttributeKey: {StringValue: ptr.To(deviceTypeVfio)},
 	}}}
-	if err := writeKubeVirtMetadata(base, claimB, "npu.rebellions.ai", allocatedB); err != nil {
+	if err := writeKubeVirtMetadata(base, claimB, allocatedB); err != nil {
 		t.Fatal(err)
 	}
-	mountA := kubevirtMetadataMounts(base, claimA, "npu.rebellions.ai", "npu")[1]
-	mountB := kubevirtMetadataMounts(base, claimB, "npu.rebellions.ai", "npu")[1]
+	mountA := kubevirtMetadataMounts(base, claimA, "npu")[1]
+	mountB := kubevirtMetadataMounts(base, claimB, "npu")[1]
 	if mountA.HostPath == mountB.HostPath || mountA.ContainerPath != mountB.ContainerPath {
 		t.Fatal("aliases must resolve to isolated host files at the same container path")
 	}
@@ -223,7 +223,7 @@ func TestKubeVirtMetadataClaimsWithSameAliasAreIsolated(t *testing.T) {
 	}
 
 	// Re-preparing the same claim (same UID) stays idempotent.
-	if err := writeKubeVirtMetadata(base, claimA, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, claimA, testAllocatable()); err != nil {
 		t.Fatalf("idempotent rewrite for claim A failed: %v", err)
 	}
 }
@@ -236,12 +236,12 @@ func TestMetadataDirectClaimsWithSameNameAcrossNamespaces(t *testing.T) {
 	b.Namespace = "team-b"
 	b.UID = "00000000-1111-2222-3333-444444444444"
 	for _, claim := range []*resourceapi.ResourceClaim{a, b} {
-		if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+		if err := writeKubeVirtMetadata(base, claim, testAllocatable()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	ma := kubevirtMetadataMounts(base, a, "npu.rebellions.ai", "npu")[0]
-	mb := kubevirtMetadataMounts(base, b, "npu.rebellions.ai", "npu")[0]
+	ma := kubevirtMetadataMounts(base, a, "npu")[0]
+	mb := kubevirtMetadataMounts(base, b, "npu")[0]
 	if ma.HostPath == mb.HostPath || ma.ContainerPath != mb.ContainerPath {
 		t.Fatal("namespace-independent container names require UID-isolated host storage")
 	}
@@ -287,23 +287,23 @@ func TestMetadataCleanupHandlesLegacyAndUIDLayouts(t *testing.T) {
 	base := t.TempDir()
 	a := testClaim(map[string]string{podClaimNameAnnotation: "npu-claim"})
 	legacy := legacyMetadataFixture(t, base, a)
-	if err := writeKubeVirtMetadata(base, a, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, a, testAllocatable()); err != nil {
 		t.Fatal(err)
 	}
 	b := a.DeepCopy()
 	b.UID = "00000000-1111-2222-3333-444444444444"
-	if err := writeKubeVirtMetadata(base, b, "npu.rebellions.ai", testAllocatable()); err != nil {
+	if err := writeKubeVirtMetadata(base, b, testAllocatable()); err != nil {
 		t.Fatal(err)
 	}
 	if err := removeKubeVirtMetadataForClaim(base, string(a.UID)); err != nil {
 		t.Fatal(err)
 	}
-	for _, mount := range append(legacy, kubevirtMetadataMounts(base, a, "npu.rebellions.ai", "npu")...) {
+	for _, mount := range append(legacy, kubevirtMetadataMounts(base, a, "npu")...) {
 		if _, err := os.Stat(mount.HostPath); !os.IsNotExist(err) {
 			t.Fatalf("A metadata survived cleanup: %s, %v", mount.HostPath, err)
 		}
 	}
-	if _, err := os.Stat(kubevirtMetadataMounts(base, b, "npu.rebellions.ai", "npu")[0].HostPath); err != nil {
+	if _, err := os.Stat(kubevirtMetadataMounts(base, b, "npu")[0].HostPath); err != nil {
 		t.Fatalf("B metadata was removed: %v", err)
 	}
 }
@@ -321,7 +321,7 @@ func TestMetadataFailedWriteRollbackLeavesLegacyClaimIntact(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "npu"), []byte("not a directory"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeKubeVirtMetadata(base, b, "npu.rebellions.ai", testAllocatable()); err == nil {
+	if err := writeKubeVirtMetadata(base, b, testAllocatable()); err == nil {
 		t.Fatal("expected metadata write failure")
 	}
 	if err := removeKubeVirtMetadataForClaim(base, string(b.UID)); err != nil {
@@ -409,12 +409,12 @@ func TestKubeVirtMetadataMountsUseWrittenFiles(t *testing.T) {
 			base := t.TempDir()
 			claim := testClaim(tc.annotations)
 			claim.Status.Allocation.Devices.Results[0].Request = tc.request
-			if err := writeKubeVirtMetadata(base, claim, "npu.rebellions.ai", testAllocatable()); err != nil {
+			if err := writeKubeVirtMetadata(base, claim, testAllocatable()); err != nil {
 				t.Fatalf("writeKubeVirtMetadata: %v", err)
 			}
 
 			result := &claim.Status.Allocation.Devices.Results[0]
-			mounts := kubevirtMetadataMounts(base, claim, "npu.rebellions.ai", kubevirtMetadataRequestName(result))
+			mounts := kubevirtMetadataMounts(base, claim, kubevirtMetadataRequestName(result))
 			if len(mounts) != tc.wantFiles {
 				t.Fatalf("mounts = %v, want %d entries", mounts, tc.wantFiles)
 			}

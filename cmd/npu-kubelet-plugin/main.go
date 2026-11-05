@@ -53,7 +53,6 @@ type Flags struct {
 	kubeletRegistrarDirectoryPath string
 	kubeletPluginsDirectoryPath   string
 	healthcheckPort               int
-	driverName                    string
 	deviceScanInterval            time.Duration
 }
 
@@ -68,7 +67,7 @@ type Config struct {
 }
 
 func (c Config) DriverPluginPath() string {
-	return filepath.Join(c.flags.kubeletPluginsDirectoryPath, c.flags.driverName)
+	return filepath.Join(c.flags.kubeletPluginsDirectoryPath, consts.DriverName)
 }
 
 func main() {
@@ -132,12 +131,6 @@ func newApp() *cli.App {
 			Destination: &flags.healthcheckPort,
 			EnvVars:     []string{"HEALTHCHECK_PORT"},
 		},
-		&cli.StringFlag{
-			Name:        "driver-name",
-			Usage:       "Name of the DRA driver.",
-			Destination: &flags.driverName,
-			EnvVars:     []string{"DRIVER_NAME"},
-		},
 		&cli.DurationFlag{
 			Name:        "device-scan-interval",
 			Aliases:     []string{"vfio-rescan-interval"},
@@ -166,10 +159,6 @@ func newApp() *cli.App {
 			clientSets, err := flags.kubeClientConfig.NewClientSets()
 			if err != nil {
 				return fmt.Errorf("create client: %w", err)
-			}
-
-			if flags.driverName == "" {
-				flags.driverName = consts.DriverName
 			}
 
 			config := &Config{

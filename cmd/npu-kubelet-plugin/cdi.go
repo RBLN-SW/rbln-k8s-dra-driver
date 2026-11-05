@@ -24,6 +24,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
@@ -41,13 +42,12 @@ const (
 )
 
 type CDIHandler struct {
-	cache      *cdiapi.Cache
-	root       string
-	driverName string
-	class      string
+	cache *cdiapi.Cache
+	root  string
+	class string
 }
 
-func NewCDIHandler(root string, driverName, class string) (*CDIHandler, error) {
+func NewCDIHandler(root, class string) (*CDIHandler, error) {
 	cache, err := cdiapi.NewCache(
 		cdiapi.WithSpecDirs(root),
 	)
@@ -55,10 +55,9 @@ func NewCDIHandler(root string, driverName, class string) (*CDIHandler, error) {
 		return nil, fmt.Errorf("unable to create a new CDI cache: %w", err)
 	}
 	handler := &CDIHandler{
-		cache:      cache,
-		root:       root,
-		driverName: driverName,
-		class:      class,
+		cache: cache,
+		root:  root,
+		class: class,
 	}
 
 	return handler, nil
@@ -288,5 +287,5 @@ func (cdi *CDIHandler) kind() string {
 }
 
 func (cdi *CDIHandler) vendor() string {
-	return "k8s." + cdi.driverName
+	return "k8s." + consts.DriverName
 }

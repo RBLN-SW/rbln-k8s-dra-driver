@@ -65,8 +65,6 @@ spec:
           periodSeconds: 10
         {{- end }}
         env:
-        - name: DRIVER_NAME
-          value: {{ include "k8s-dra-driver-npu.driverName" . | quote }}
         - name: CDI_ROOT
           value: /var/run/cdi
         - name: KUBELET_REGISTRAR_DIRECTORY_PATH

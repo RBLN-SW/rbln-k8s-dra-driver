@@ -7,7 +7,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 : "${KUBECONFIG:?Set the test kubeconfig explicitly}"
 : "${SRIOV_NODE:?Set the dedicated NPU test node}"
 MODE="${MODE:-vf4}"
-DRIVER_NAME="${DRIVER_NAME:-npu.rebellions.ai}"
+readonly driver_name="npu.rebellions.ai"
 TEST_IMAGE="${TEST_IMAGE:-ubuntu:22.04}"
 case "$MODE" in none|vf1|vf4) ;; *) echo 'MODE must be none, vf1, or vf4' >&2; exit 1;; esac
 if ! command -v jq >/dev/null 2>&1; then
@@ -15,7 +15,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 if [[ -n "${EXPECTED_DEVICES:-}" ]]; then
-  count="$(kubectl get resourceslices -o json | jq --arg driver "$DRIVER_NAME" --arg node "$SRIOV_NODE" --arg mode "$MODE" '[.items[]|select(.spec.driver==$driver and .spec.pool.name==$node)|.spec.devices[]|select(.attributes.partitionMode.string==$mode)]|length')"
+  count="$(kubectl get resourceslices -o json | jq --arg driver "$driver_name" --arg node "$SRIOV_NODE" --arg mode "$MODE" '[.items[]|select(.spec.driver==$driver and .spec.pool.name==$node)|.spec.devices[]|select(.attributes.partitionMode.string==$mode)]|length')"
   [[ "$count" == "$EXPECTED_DEVICES" ]] || { echo "Expected $EXPECTED_DEVICES devices, found $count" >&2; exit 1; }
 fi
 ns="rbln-dra-e2e-${RANDOM}-${RANDOM}"
@@ -26,10 +26,10 @@ cleanup() {
 }
 trap cleanup EXIT
 kubectl create namespace "$ns" >/dev/null
-prefix="${DRIVER_NAME%%.*}"
-domain="${DRIVER_NAME#*.}"
+prefix="${driver_name%%.*}"
+domain="${driver_name#*.}"
 if [[ "$MODE" == none ]]; then
-  device_class="$DRIVER_NAME"
+  device_class="$driver_name"
 else
   device_class="${prefix}-${MODE}.${domain}"
 fi
@@ -80,19 +80,19 @@ spec:
         count: 1
         selectors:
         - cel:
-            expression: 'device.attributes["$DRIVER_NAME"].partitionMode == "$MODE"'
+            expression: 'device.attributes["$driver_name"].partitionMode == "$MODE"'
 YAML
   make_pod "consumer-$suffix" "claim-$suffix"
 done
 kubectl wait -n "$ns" --for=condition=Ready pod/consumer-a pod/consumer-b --timeout=180s
 allocation() {
-  kubectl get resourceclaim -n "$ns" "claim-$1" -o json | jq -er --arg driver "$DRIVER_NAME" --arg node "$SRIOV_NODE" '.status.allocation.devices.results[] | select(.driver==$driver and .pool==$node) | .device'
+  kubectl get resourceclaim -n "$ns" "claim-$1" -o json | jq -er --arg driver "$driver_name" --arg node "$SRIOV_NODE" '.status.allocation.devices.results[] | select(.driver==$driver and .pool==$node) | .device'
 }
 a="$(allocation a)"; b="$(allocation b)"
 [[ "$a" != "$b" ]] || { echo 'Distinct claims received the same device' >&2; exit 1; }
 check_workload() {
   local pod="$1" device="$2" expected_bus
-  expected_bus="$(kubectl get resourceslices -o json | jq -er --arg driver "$DRIVER_NAME" --arg node "$SRIOV_NODE" --arg device "$device" --arg mode "$MODE" '.items[] | select(.spec.driver==$driver and .spec.pool.name==$node) | .spec.devices[] | select(.name==$device and .attributes.partitionMode.string==$mode) | .attributes["resource.kubernetes.io/pciBusID"].string')"
+  expected_bus="$(kubectl get resourceslices -o json | jq -er --arg driver "$driver_name" --arg node "$SRIOV_NODE" --arg device "$device" --arg mode "$MODE" '.items[] | select(.spec.driver==$driver and .spec.pool.name==$node) | .spec.devices[] | select(.name==$device and .attributes.partitionMode.string==$mode) | .attributes["resource.kubernetes.io/pciBusID"].string')"
   # The shared group check does not verify the allocated PCI address or reject group 0.
   if ! kubectl exec -n "$ns" "$pod" -- rbln-smi -j -g | jq -e --arg bus "$expected_bus" '.devices | length==1 and .[0].pci.bus_id==$bus and (.[0].group_id|tonumber)>0' >/dev/null; then
     echo "Expected $ns/$pod to expose only $expected_bus in a non-default RSD group" >&2

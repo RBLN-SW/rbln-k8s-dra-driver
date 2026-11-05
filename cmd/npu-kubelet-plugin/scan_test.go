@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/internal/logtest"
-	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
 	rblndevice "github.com/rbln-sw/rblnlib-go/pkg/device"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
@@ -353,7 +352,7 @@ func TestNativeFailureStreakEndsWhenNoNativeCandidatesRemain(t *testing.T) {
 	buf := logtest.Capture(t, "info")
 	failure := errors.New("SMI unavailable")
 	st, err := NewDeviceState(context.Background(), &Config{
-		flags:               &Flags{nodeName: "node-1", driverName: consts.DriverName, cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
+		flags:               &Flags{nodeName: "node-1", cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
 		sysfsPCIDevicesRoot: writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:17:00.0", "0")}),
 		inventoryFn:         func(context.Context) ([]rblndevice.Device, error) { return nil, failure },
 	})
@@ -395,7 +394,7 @@ func TestNewDeviceStateReportsVfioExclusionAtStartup(t *testing.T) {
 	d := rblnVfioDevice("0000:17:00.0")
 	d.iommuGroup = ""
 	st, err := NewDeviceState(context.Background(), &Config{
-		flags:               &Flags{nodeName: "node-1", driverName: consts.DriverName, cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
+		flags:               &Flags{nodeName: "node-1", cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
 		sysfsPCIDevicesRoot: writeFakeSysfs(t, []fakePCIDevice{d}), inventoryFn: inventoryOf(),
 	})
 	if err != nil {
@@ -590,7 +589,7 @@ func TestNewDeviceStateSkipsRblnSmiOnPassthroughNode(t *testing.T) {
 	buf := logtest.Capture(t, "info")
 	calls := 0
 	config := &Config{
-		flags:               &Flags{nodeName: "node-1", driverName: consts.DriverName, cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
+		flags:               &Flags{nodeName: "node-1", cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
 		sysfsPCIDevicesRoot: writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:17:00.0", "4"), vfioVF("0000:17:00.1", "0000:17:00.0")}),
 		inventoryFn: func(context.Context) ([]rblndevice.Device, error) {
 			calls++
@@ -617,7 +616,7 @@ func TestNewDeviceStateSkipsRblnSmiOnPassthroughNode(t *testing.T) {
 func TestNewDeviceStateRecoversFromNativeInventoryFailure(t *testing.T) {
 	ctx := context.Background()
 	st, err := NewDeviceState(ctx, &Config{
-		flags:               &Flags{nodeName: "node-1", driverName: consts.DriverName, cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
+		flags:               &Flags{nodeName: "node-1", cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
 		sysfsPCIDevicesRoot: writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:17:00.0", "0")}),
 		inventoryFn:         func(context.Context) ([]rblndevice.Device, error) { return nil, errors.New("driver initializing") },
 	})
@@ -636,7 +635,7 @@ func TestNewDeviceStateRecoversFromNativeInventoryFailure(t *testing.T) {
 func TestPrepareRetriesCommonCDIAfterLateNativeDiscovery(t *testing.T) {
 	ctx := context.Background()
 	st, err := NewDeviceState(ctx, &Config{
-		flags:               &Flags{nodeName: "node-1", driverName: consts.DriverName, cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
+		flags:               &Flags{nodeName: "node-1", cdiRoot: t.TempDir(), kubeletPluginsDirectoryPath: t.TempDir()},
 		sysfsPCIDevicesRoot: writeFakeSysfs(t, []fakePCIDevice{rblnVfioDevice("0000:4d:00.0")}),
 		inventoryFn:         inventoryOf(),
 	})

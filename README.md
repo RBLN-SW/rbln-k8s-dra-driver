@@ -24,6 +24,8 @@ The NPU operator can also deploy this driver itself
 (`draKubeletPlugin.enabled: true` in the `RBLNClusterPolicy`); in that case
 do not install this chart separately.
 
+The driver identity is fixed to `npu.rebellions.ai`.
+
 ## SR-IOV resources
 
 REBEL VFs in `vf1` and `vf4` mode can be allocated through DRA. Deploy builds
@@ -72,8 +74,8 @@ Device classification uses PCI sysfs:
 A missing PCI entry is excluded rather than treated as an unpartitioned PF.
 An existing PF without SR-IOV attributes remains supported as a physical NPU.
 
-Container devices expose these attributes under the driver domain
-(`npu.rebellions.ai` by default):
+Container devices expose these attributes under the fixed driver domain
+`npu.rebellions.ai`:
 
 | Attribute | Type | PF | VF |
 |---|---|---|---|
