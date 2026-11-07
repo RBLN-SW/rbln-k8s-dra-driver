@@ -2,7 +2,7 @@
 
 On nodes with the `vm-passthrough` workload config, usable Rebellions PCI
 functions (vendor `0x1eff`, class `0x120000`) are bound to `vfio-pci`.
-For PM-managed SR-IOV, the PF stays on `rebellions` and only its VFs bind to
+For DCM-managed SR-IOV, the PF stays on `rebellions` and only its VFs bind to
 `vfio-pci`. The kubelet plugin discovers those devices by scanning
 `/sys/bus/pci/devices` and publishes them in the node's ResourceSlice as
 `vfio-<pci-address>` devices with `type: "vfio"`, alongside:
@@ -155,7 +155,7 @@ kubectl delete namespace npu-example-passthrough
 
 ## SR-IOV hardware validation
 
-After PM converges a VF1 or VF4 layout, use the corresponding VFIO class in
+After DCM converges a VF1 or VF4 layout, use the corresponding VFIO class in
 the template above. Create two VMs with different names referencing that
 template so each receives its own claim. Verify both VMs reach Running and
 inspect their allocated PCI addresses in ResourceSlices and the guests.
@@ -173,5 +173,5 @@ ls -1 "/sys/bus/pci/devices/$VF_BDF/iommu_group/devices"
 
 Expect `vfio-pci`, the native parent PF, and a group listing only that VF.
 Before testing a different profile, terminate both VMs and release their
-claims through the managed PM transition. Recreate the VMs with the new
+claims through the managed DCM transition. Recreate the VMs with the new
 profile class; old VF identities must not satisfy the new profile.

@@ -1,10 +1,10 @@
 # Single Pod Requesting an SR-IOV VF
 
 This example allocates one VF from a PF partitioned into four VFs. Enable
-`partitionManager` and `draKubeletPlugin` in the operator, disable the ordinary
+`deviceConfigManager` and `draKubeletPlugin` in the operator, disable the ordinary
 device-plugin on these nodes, and use builds containing SR-IOV DRA support.
 
-Set the desired layout and wait for partition-manager to finish:
+Set the desired layout and wait for device-config-manager to finish:
 
 ```bash
 kubectl label node <node> rebellions.ai/npu.partition=vf4 --overwrite
