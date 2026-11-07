@@ -1,20 +1,22 @@
 # Single Pod Requesting an SR-IOV VF
 
-This example allocates one VF from a PF partitioned into four VFs. Enable
-`deviceConfigManager` and `draKubeletPlugin` in the operator, disable the ordinary
-device-plugin on these nodes, and use builds containing SR-IOV DRA support.
+This example allocates one VF from a physical function (PF) configured with
+four VFs. The host must expose these VFs through the native NPU driver, and
+the DRA kubelet plugin must publish them in ResourceSlices. Use a single
+allocator for these devices; do not advertise the same NPUs through another
+device plugin at the same time.
 
-Set the desired layout and wait for device-config-manager to finish:
+Verify the VF DeviceClass and the published device inventory before applying
+the workload:
 
 ```bash
-kubectl label node <node> rebellions.ai/npu.partition=vf4 --overwrite
-kubectl wait node <node> --for=condition=NPUPartitionReady --timeout=5m
 kubectl get deviceclass npu-vf4.rebellions.ai
+kubectl get resourceslices -o yaml
 ```
 
-The operator gates DRA startup on partition readiness. One VF is one DRA
-device; `count: 2` requests two VFs. For `vf1`, use the `vf1` label and
-`npu-vf1.rebellions.ai` class instead.
+Check that the intended node's inventory contains VFs with
+`partitionMode: vf4` and `numVFs: 4`. One VF is one DRA device; `count: 2` requests two VFs.
+With one VF per PF, use the `npu-vf1.rebellions.ai` class instead.
 
 ## Apply
 

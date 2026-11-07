@@ -28,9 +28,9 @@ The driver identity is fixed to `npu.rebellions.ai`.
 
 ## SR-IOV resources
 
-REBEL VFs in `vf1` and `vf4` mode can be allocated through DRA. Deploy builds
-of the DRA driver, NPU operator, and device-config-manager that include this
-support together. VF creation remains the device-config-manager's responsibility.
+REBEL VFs in `vf1` and `vf4` mode can be allocated through DRA. Configure the
+VFs and their driver bindings on the host, then verify that the DRA driver
+publishes the intended devices in ResourceSlices before allocating them.
 
 | DeviceClass | Extended resource | Devices selected |
 |---|---|---|
@@ -117,8 +117,8 @@ republishes the ResourceSlice only when the inventory changes. The legacy
 now control the shared scan loop. If both environment variables are set,
 `DEVICE_SCAN_INTERVAL` takes precedence. New VFs and
 devices that recover from an indeterminate SR-IOV state appear after a
-successful scan. A scan that lands while device-config-manager is still creating
-VFs may publish a partial set; later scans converge. `rbln-smi` runs only when
+successful scan. A scan that lands while SR-IOV configuration is changing
+may publish a partial set; later scans converge. `rbln-smi` runs only when
 sysfs shows an NPU bound to the native driver, so VM-passthrough nodes never
 execute it.
 
@@ -143,13 +143,12 @@ cannot be read or written, Prepare returns an error for kubelet to retry.
 Provision VFs before starting DRA. Before changing partitions, drain NPU
 consumers and wait for them to terminate and release their allocations, then
 wait for the new inventory before admitting new workloads. Do not reuse
-pre-change ResourceClaims across repartitioning. The device-config-manager owns
-VF creation/removal, driver binding, drain and plugin refresh; scanning does
-not make live repartitioning safe. For managed provisioning and readiness,
-see the [Operator documentation](https://github.com/RBLN-SW/rbln-npu-operator/blob/main/README.md)
-and [device-config-manager documentation](https://github.com/RBLN-SW/k8s-device-config-manager/blob/main/README.md).
-Standalone Helm installations must enforce this sequence themselves. Do not
-expose the same NPUs through both device-plugin and DRA on a node.
+pre-change ResourceClaims across repartitioning. Coordinate VF creation or
+removal, driver binding, workload drain and device registration as part of
+host provisioning; periodic scanning alone does not make live repartitioning
+safe. Resume workloads only after the published inventory matches the new
+configuration. Do not expose the same NPUs through both device-plugin and
+DRA on a node.
 
 See [a Pod requesting one VF](examples/single-pod-npu-vf4.md) for a runnable
 ResourceClaimTemplate example. VFIO claims use the existing passthrough CDI
@@ -202,7 +201,7 @@ KUBECONFIG=/path/to/test/kubeconfig SRIOV_NODE=<node> MODE=vf4 \
   test/e2e/run-sriov.sh
 ```
 
-Run for `none`, `vf1`, and `vf4` after device-config-manager converges each layout.
+Run for `none`, `vf1`, and `vf4` after configuring and verifying each host layout.
 The script is intentionally outside the general CI cases because it requires
 a preconfigured SR-IOV node. It checks distinct allocations, VF PCI addresses,
 non-default RSD groups, CDI injection, and Pod reuse of a claim. It does not
@@ -311,6 +310,7 @@ See [RC validation setup and image inputs](docs/rc-validation.md).
 
 The gRPC health service exposes `readiness` in addition to `liveness`. Readiness
 requires kubelet registration acknowledgement as well as working plugin RPCs.
-It does not assert that asynchronous ResourceSlice publication has completed;
-device-config-manager checks the published inventory before releasing its cordon.
-Use a matching image when enabling the chart/operator readinessProbe.
+It does not assert that asynchronous ResourceSlice publication has completed.
+Verify the published inventory before resuming workloads after hardware
+reconfiguration. Use the `readiness` service for deployment probes that must
+wait for kubelet registration.
