@@ -1,9 +1,9 @@
 # KubeVirt VM with an NPU passed through via DRA
 
-On nodes with the `vm-passthrough` workload config, usable Rebellions PCI
-functions (vendor `0x1eff`, class `0x120000`) are bound to `vfio-pci`.
-For PM-managed SR-IOV, the PF stays on `rebellions` and only its VFs bind to
-`vfio-pci`. The kubelet plugin discovers those devices by scanning
+For VM passthrough, usable Rebellions PCI functions (vendor `0x1eff`, class
+`0x120000`) must be bound to `vfio-pci`. With SR-IOV, the PF stays on the
+native `rebellions` driver and only its VFs bind to `vfio-pci`.
+The kubelet plugin discovers those devices by scanning
 `/sys/bus/pci/devices` and publishes them in the node's ResourceSlice as
 `vfio-<pci-address>` devices with `type: "vfio"`, alongside:
 
@@ -39,10 +39,9 @@ count: 1
 - Kubernetes v1.34 or later (`resource.k8s.io/v1`).
 - KubeVirt v1.9.0 or later with the `HostDevicesWithDRA` feature gate
   enabled.
-- RBLN NPU Operator with `workloadType: vm-passthrough` and
-  `draKubeletPlugin.enabled: true`. `sandboxDevicePlugin` must stay disabled:
-  the two advertise the same vfio devices, so the operator rejects a policy
-  that enables both.
+- The RBLN DRA kubelet plugin deployed and publishing the intended VFIO
+  devices in ResourceSlices. Use a single allocator for each PCI function;
+  do not advertise the same functions through another device plugin.
 - IOMMU enabled on the host (VM-based nodes need a vIOMMU), with one PCI
   function per allocated IOMMU group. Shared groups are not advertised.
 
@@ -155,9 +154,9 @@ kubectl delete namespace npu-example-passthrough
 
 ## SR-IOV hardware validation
 
-After PM converges a VF1 or VF4 layout, use the corresponding VFIO class in
-the template above. Create two VMs with different names referencing that
-template so each receives its own claim. Verify both VMs reach Running and
+After configuring one or four VFs per PF and verifying their VFIO bindings,
+use the corresponding VFIO class in the template above. Create two VMs
+with different names referencing that template so each receives its own claim. Verify both VMs reach Running and
 inspect their allocated PCI addresses in ResourceSlices and the guests.
 The two claims must have distinct VF BDFs and distinct IOMMU groups.
 
@@ -173,5 +172,6 @@ ls -1 "/sys/bus/pci/devices/$VF_BDF/iommu_group/devices"
 
 Expect `vfio-pci`, the native parent PF, and a group listing only that VF.
 Before testing a different profile, terminate both VMs and release their
-claims through the managed PM transition. Recreate the VMs with the new
-profile class; old VF identities must not satisfy the new profile.
+claims, then change the host layout and driver bindings. Wait for the new
+ResourceSlice inventory before recreating the VMs with the new profile
+class; old VF identities must not satisfy the new profile.
