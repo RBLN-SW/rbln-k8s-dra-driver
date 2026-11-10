@@ -15,10 +15,8 @@ permissions:
 jobs:
   lint:
     uses: ./.github/workflows/lint.yaml
-    secrets: inherit
   manifests-check:
     uses: ./.github/workflows/manifests.check.yaml
-    secrets: inherit
   image-build-push:
     needs: [lint, manifests-check]
     uses: ./.github/workflows/image-build-push.yaml
