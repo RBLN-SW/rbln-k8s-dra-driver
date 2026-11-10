@@ -51,12 +51,6 @@ spec:
           actually running.
         */}}
         {{- if (gt (int .Values.kubeletPlugin.containers.plugin.healthcheckPort) 0) }}
-        readinessProbe:
-          grpc:
-            port: {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort }}
-            service: readiness
-          periodSeconds: 2
-          failureThreshold: 1
         livenessProbe:
           grpc:
             port: {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort }}
