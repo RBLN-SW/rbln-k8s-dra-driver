@@ -122,8 +122,9 @@ may publish a partial set; later scans converge. `rbln-smi` runs only when
 sysfs shows an NPU bound to the native driver, so VM-passthrough nodes never
 execute it.
 
-If a sysfs inventory read or `rbln-smi` query fails, discard that scan and keep
-the last complete inventory. Old native devices are never merged with newly
+If a sysfs inventory read or `rbln-smi` query fails, keep
+the last complete discovery snapshot and still refresh native device health.
+Old native devices are never merged with newly
 scanned VFIO devices. The next successful scan replaces both lists together;
 a successful empty scan removes devices. Required per-device read/parse errors
 also discard the scan. Confirmed unsupported profiles, unbound functions and
@@ -207,6 +208,45 @@ a preconfigured SR-IOV node. It checks distinct allocations, VF PCI addresses,
 non-default RSD groups, CDI injection, and Pod reuse of a claim. It does not
 change partitions or restart the plugin.
 
+### Device health and failure response
+
+At startup and every device scan, native NPUs are checked through
+`/sys/class/rebellions/<deviceNodeName>/status`. `0` (`READY`) is healthy;
+`1` (`BUSY`), `2` (`PROBING`), `3` (`INIT`), `4` (`FAULT`), `5` (`FINISH`)
+and unknown numeric values are unhealthy.
+Missing, unreadable or malformed status files preserve the last allocation
+health. Once a device is observed unhealthy by a scan or Prepare, read failures
+keep it unavailable until `READY` is observed; they do not count as recovery.
+Without a recorded fault, unreadable status still permits allocation for
+compatibility, including VFs whose driver does not expose status. This history
+is held in memory for devices retained in discovery and is not checkpointed
+across plugin restarts. VF checks use the native node name, such as
+`rbln0-0`, without the DRA profile suffix. VFIO devices have no native health
+check on the host.
+
+Unhealthy native devices are removed from the ResourceSlice and from the
+driver's allocatable set, preventing new allocations to those devices while
+leaving healthy devices on the node available. A later healthy observation
+restores the same device identity. Faults and recovery are logged on state
+changes with the device name, PCI address, SID and status. Health checks also
+continue against known devices when inventory discovery fails. With periodic
+scanning disabled, published health is only refreshed at startup.
+
+A fresh Prepare rechecks status before creating CDI or RSD state, so a fault
+between scans also rejects preparation. Already prepared claims keep their
+checkpoint and CDI state and can still be unprepared through the normal
+cleanup path; health changes do not evict running Pods or automatically
+reallocate existing claims. The gRPC liveness/readiness probes describe plugin
+service health, separately from NPU health.
+
+For a failed workload, identify the device from the claim allocation and the
+health-transition log, then confirm it is absent from the ResourceSlice.
+Stop the affected consumer and wait for its claim to be released before
+repairing the device. If rescheduling onto another NPU is needed, recreate the
+consumer with a new claim (for example through a ResourceClaimTemplate);
+reusing an allocated claim retains its device assignment. Resume use of the
+repaired NPU after it is healthy and appears in the ResourceSlice again.
+
 ## Logging
 
 Both binaries (`npu-kubelet-plugin`, `webhook`) log structured JSON to stdout by
@@ -283,7 +323,7 @@ stamped from the release tag. A plain `make cmds` with no `VERSION` reports
 | Pods stay `Pending`, no devices offered | `No NPU devices found on this node` (warn), or the `Driver started` `deviceCount` (`npuDeviceCount` / `vfioDeviceCount` split it by kind) |
 | VMs stay `Pending`, no passthrough device offered | `Failed to enumerate vfio-pci NPU devices` or `Skipping NPU not usable in its current PCI state` (error, with the reason); a passthrough-only node reports `No NPU bound to the native driver, skipping rbln-smi` instead of running it |
 | Devices came, went or changed profile without a restart | `Device inventory changed, republishing resources` with `added` / `removed` / `changed`; an excluded native or VFIO device is reported at startup and when it leaves the inventory, without repeating the exclusion every tick |
-| Scan loop may be failing or too slow | `Device scan failed, keeping last inventory` or `NPU enumeration failed, keeping last inventory` (error, once per failing streak, with a matching `recovered` info); both lists stay at the last complete snapshot. `Device scan slower than its interval` (warn); at `debug`, each successful scan records counts, `skipped` reasons and `durationMs` |
+| Scan loop may be failing or too slow | `Device scan failed, keeping last inventory` or `NPU enumeration failed, keeping last inventory` (error, once per failing streak, with a matching `recovered` info); discovery stays at the last complete snapshot while native health is still checked. `Device scan slower than its interval` (warn); at `debug`, each successful scan records counts, `skipped` reasons and `durationMs` |
 | Pod stuck in `ContainerCreating` | `Failed to prepare devices for claim` (error) with `err` and the claim keys |
 | Multi-NPU job's RSD group could not be created | `Failed to prepare devices for claim` (error) with an `err` naming the RSD group; RSD creation is mandatory, so the pod stays in `ContainerCreating` instead of starting degraded |
 | Container cannot see `/dev/rsd0` or the NPU | `Wrote CDI spec for claim` at `debug`, which lists the injected `deviceNodes` |

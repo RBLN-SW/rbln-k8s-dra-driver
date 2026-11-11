@@ -80,9 +80,11 @@ type DeviceState struct {
 	// inventoryFn reads the rbln-smi inventory; tests inject a fake.
 	inventoryFn inventoryFunc
 
-	npuDevices          []resourceapi.Device
-	vfioDevices         []resourceapi.Device
-	sysfsPCIDevicesRoot string
+	npuDevices               []resourceapi.Device
+	vfioDevices              []resourceapi.Device
+	sysfsPCIDevicesRoot      string
+	sysfsRebellionsClassRoot string
+	deviceHealth             map[string]deviceHealth
 	// scan holds the transition flags behind the scan loop's logging. Only
 	// the scan goroutine touches it, so it needs no lock.
 	scan scanStatus
@@ -173,18 +175,20 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 
 	state := &DeviceState{
-		nodeName:            config.flags.nodeName,
-		cdi:                 cdi,
-		checkpointManager:   checkpointManager,
-		rsdGroupFn:          func(ids []string) (string, error) { return recreateValidatedRSDGroup(ctx, ids) },
-		inventoryFn:         inventoryFn,
-		npuDevices:          npuDevices,
-		vfioDevices:         vfioDevices,
-		sysfsPCIDevicesRoot: sysfsRoot,
+		nodeName:                 config.flags.nodeName,
+		cdi:                      cdi,
+		checkpointManager:        checkpointManager,
+		rsdGroupFn:               func(ids []string) (string, error) { return recreateValidatedRSDGroup(ctx, ids) },
+		inventoryFn:              inventoryFn,
+		npuDevices:               npuDevices,
+		vfioDevices:              vfioDevices,
+		sysfsPCIDevicesRoot:      sysfsRoot,
+		sysfsRebellionsClassRoot: config.sysfsRebellionsClassRoot,
 		// A startup failure is the first tick of a failing streak: the loop
 		// then reports recovery instead of repeating the error.
 		scan: scanStatus{npuFailing: npuErr != nil},
 	}
+	state.refreshDeviceHealth(ctx)
 	state.rebuildResources()
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
@@ -206,7 +210,13 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 // Callers must hold the lock unless the state is not shared yet.
 func (s *DeviceState) rebuildResources() {
-	devices := slices.Concat(s.npuDevices, s.vfioDevices)
+	var devices []resourceapi.Device
+	for _, d := range s.npuDevices {
+		if !s.deviceHealth[d.Name].unhealthy {
+			devices = append(devices, d)
+		}
+	}
+	devices = append(devices, s.vfioDevices...)
 
 	allocatable := make(AllocatableDevices, len(devices))
 	for _, d := range devices {
@@ -413,6 +423,14 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		}
 		if err := validateAllocatedDevice(s.sysfsPCIDevicesRoot, allocated); err != nil {
 			return nil, fmt.Errorf("allocated device %s is unavailable: %w", result.Device, err)
+		}
+		// Recheck before any CDI/RSD side effects: status may have changed
+		// since the last scan, or periodic scanning may be disabled.
+		if !isVfioDevice(allocated) {
+			health := s.checkDeviceHealth(ctx, allocated)
+			if health.unhealthy {
+				return nil, fmt.Errorf("allocated device %s is unhealthy: %s", result.Device, health.status)
+			}
 		}
 		results = append(results, result)
 	}
