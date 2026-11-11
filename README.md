@@ -299,13 +299,13 @@ See `examples/README.md` for usage examples.
 
 ## PR CI
 
-Obedients loads the [RNPM PR bootstrap](.buildkite/pipeline.rnpm.pr.yml).
-The registered RNPM `pr` bundle defines the image build and Sentinel tests;
+Obedients loads the [piper PR bootstrap](.buildkite/pipeline.piper.pr.yml).
+The registered piper `pr` bundle defines the image build and Sentinel tests;
 this repository no longer keeps a separate legacy Buildkite PR pipeline.
 
 ## RC validation
 
-Release candidates are tested through RNPM using their published images.
+Release candidates are tested through piper using their published images.
 See [RC validation setup and image inputs](docs/rc-validation.md).
 
 The gRPC health service exposes `readiness` in addition to `liveness`. Readiness
