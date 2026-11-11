@@ -101,8 +101,8 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 // runDeviceScan republishes the ResourceSlice whenever the set of NPU
 // devices, native or vfio-pci bound, changes (see DeviceState.RescanDevices).
-// A failed scan keeps the last complete inventory, logs its own transition,
-// and is retried on the next tick.
+// A failed scan keeps the last complete inventory, still updates device health,
+// logs its own transition, and is retried on the next tick.
 func (d *driver) runDeviceScan(ctx context.Context, interval time.Duration) {
 	logger := logging.FromContext(ctx)
 
@@ -117,9 +117,11 @@ func (d *driver) runDeviceScan(ctx context.Context, interval time.Duration) {
 		}
 
 		start := time.Now()
-		resources, changed, err := d.state.RescanDevices(ctx)
+		// Discovery errors are logged by RescanDevices. Health can still
+		// change on an incomplete discovery and must be published then too.
+		resources, changed, _ := d.state.RescanDevices(ctx)
 		d.state.observeScanDuration(ctx, time.Since(start), interval)
-		if err != nil || !changed {
+		if !changed {
 			continue
 		}
 

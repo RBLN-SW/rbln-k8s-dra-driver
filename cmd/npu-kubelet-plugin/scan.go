@@ -51,19 +51,20 @@ func (s *DeviceState) observeScanDuration(ctx context.Context, took, interval ti
 // the swap under it is whole-list, so Prepare sees either the previous or
 // the next inventory, never a mix.
 //
-// A failed read discards the entire tick and keeps the last successful
-// snapshot. Never combine old native devices with newly scanned VFIO devices:
+// A failed inventory read keeps the last successful discovery snapshot.
+// Never combine old native devices with newly scanned VFIO devices:
 // a rebound PCI function could otherwise be published under both names.
-// A successful empty scan removes devices normally.
+// Health is still refreshed for that snapshot, so an inventory failure does
+// not hide a device fault. A successful empty scan removes devices normally.
 func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverResources, bool, error) {
 	logger := logging.FromContext(ctx)
 	start := time.Now()
 
-	// Reuse the published inventory to distinguish an unknown vendor from
-	// a temporarily unreadable NPU; no separate identity cache is needed.
+	// Reuse discovery, including unhealthy devices, to distinguish an unknown
+	// vendor from a temporarily unreadable NPU; no separate cache is needed.
 	known := map[string]bool{}
 	s.Lock()
-	for _, d := range s.allocatable {
+	for _, d := range slices.Concat(s.npuDevices, s.vfioDevices) {
 		for _, key := range []resourceapi.QualifiedName{pciBusIDAttributeKey, parentPCIBusIDAttributeKey} {
 			if bus := deviceStringAttr(d, key); bus != "" {
 				known[strings.ToLower(bus)] = true
@@ -79,10 +80,10 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 	if err != nil {
 		if !s.scan.sysfsFailing {
 			logger.Error("Device scan failed, keeping last inventory", "err", err,
-				"impact", "the ResourceSlice stays as last published until a scan succeeds")
+				"impact", "device identities stay unchanged until a scan succeeds; native health is still checked")
 		}
 		s.scan.sysfsFailing = true
-		return s.DriverResources(), false, err
+		return s.resourcesAfterScanError(ctx, err)
 	} else if s.scan.sysfsFailing {
 		logger.Info("Device scan recovered")
 		s.scan.sysfsFailing = false
@@ -106,7 +107,7 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 		}
 		s.scan.npuFailing = inventoryErr != nil
 		if inventoryErr != nil {
-			return s.DriverResources(), false, inventoryErr
+			return s.resourcesAfterScanError(ctx, inventoryErr)
 		}
 	} else {
 		// No native query is needed this tick. A later failure starts a new streak.
@@ -121,13 +122,14 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 		if seen[bus] {
 			err := fmt.Errorf("PCI function %s appeared in both discovery results", bus)
 			logger.Error("Discarding inconsistent device scan", "err", err)
-			return s.DriverResources(), false, err
+			return s.resourcesAfterScanError(ctx, err)
 		}
 		seen[bus] = true
 	}
 
 	s.Lock()
 	defer s.Unlock()
+	previousResources := s.driverResources
 	changed := !equality.Semantic.DeepEqual(npuDevices, s.npuDevices) || !equality.Semantic.DeepEqual(vfioDevices, s.vfioDevices)
 	if changed {
 		added, removed, renamed := deviceNameDelta(slices.Concat(s.npuDevices, s.vfioDevices), slices.Concat(npuDevices, vfioDevices))
@@ -145,8 +147,10 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 			}
 		}
 		s.npuDevices, s.vfioDevices = npuDevices, vfioDevices
-		s.rebuildResources()
 	}
+	s.refreshDeviceHealth(ctx)
+	s.rebuildResources()
+	changed = !equality.Semantic.DeepEqual(previousResources, s.driverResources)
 
 	// The only per-tick record: it tells a quiet loop from a dead one.
 	reasons := make(map[string]string, len(skipped))
@@ -160,6 +164,17 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 	}
 	logger.Debug("Scanned device inventory", attrs...)
 	return s.driverResources, changed, nil
+}
+
+// Inventory failures preserve identities, but must not leave a known fault
+// allocatable merely because rbln-smi or PCI discovery is also failing.
+func (s *DeviceState) resourcesAfterScanError(ctx context.Context, scanErr error) (resourceslice.DriverResources, bool, error) {
+	s.Lock()
+	defer s.Unlock()
+	previousResources := s.driverResources
+	s.refreshDeviceHealth(ctx)
+	s.rebuildResources()
+	return s.driverResources, !equality.Semantic.DeepEqual(previousResources, s.driverResources), scanErr
 }
 
 // skippedDevice is a native or VFIO inventory entry that enumeration did not

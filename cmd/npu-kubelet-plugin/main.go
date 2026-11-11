@@ -62,8 +62,9 @@ type Config struct {
 	cancelMainCtx func(error)
 
 	// Test seams; zero values select the production sysfs root and rbln-smi.
-	sysfsPCIDevicesRoot string
-	inventoryFn         inventoryFunc
+	sysfsPCIDevicesRoot      string
+	sysfsRebellionsClassRoot string
+	inventoryFn              inventoryFunc
 }
 
 func (c Config) DriverPluginPath() string {
