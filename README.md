@@ -347,10 +347,3 @@ this repository no longer keeps a separate legacy Buildkite PR pipeline.
 
 Release candidates are tested through piper using their published images.
 See [RC validation setup and image inputs](docs/rc-validation.md).
-
-The gRPC health service exposes `readiness` in addition to `liveness`. Readiness
-requires kubelet registration acknowledgement as well as working plugin RPCs.
-It does not assert that asynchronous ResourceSlice publication has completed.
-Verify the published inventory before resuming workloads after hardware
-reconfiguration. Use the `readiness` service for deployment probes that must
-wait for kubelet registration.

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/consts"
@@ -38,7 +37,6 @@ type driver struct {
 	state       *DeviceState
 	healthcheck *healthcheck
 	cancelCtx   func(error)
-	registered  atomic.Bool
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
@@ -61,14 +59,13 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.DriverName(consts.DriverName),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
-		kubeletplugin.GRPCInterceptor(driver.observeRegistration),
 	)
 	if err != nil {
 		return nil, err
 	}
 	driver.helper = helper
 
-	driver.healthcheck, err = startHealthcheck(ctx, config, driver.registered.Load)
+	driver.healthcheck, err = startHealthcheck(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
@@ -78,9 +75,8 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	// The last startup record, and the one that says the plugin is serving:
-	// enumeration, RPC startup, the healthcheck and the publish request succeeded.
-	// Kubelet acknowledgement is tracked separately by the readiness service.
-	// PublishResources does not block and the apiserver
+	// enumeration, kubelet registration, the healthcheck and the publish
+	// request all succeeded. PublishResources does not block and the apiserver
 	// rejects invalid slices asynchronously, so this claims the driver is up,
 	// not that the ResourceSlice exists yet — a rejected write arrives later
 	// through HandleError.

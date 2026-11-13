@@ -44,12 +44,11 @@ type healthcheck struct {
 	server *grpc.Server
 	wg     sync.WaitGroup
 
-	regClient  registerapi.RegistrationClient
-	draClient  drapb.DRAPluginClient
-	registered func() bool
+	regClient registerapi.RegistrationClient
+	draClient drapb.DRAPluginClient
 }
 
-func startHealthcheck(ctx context.Context, config *Config, registered func() bool) (*healthcheck, error) {
+func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error) {
 	port := config.flags.healthcheckPort
 	if port < 0 {
 		return nil, nil
@@ -91,10 +90,9 @@ func startHealthcheck(ctx context.Context, config *Config, registered func() boo
 
 	server := grpc.NewServer()
 	healthcheck := &healthcheck{
-		server:     server,
-		regClient:  registerapi.NewRegistrationClient(regConn),
-		draClient:  drapb.NewDRAPluginClient(draConn),
-		registered: registered,
+		server:    server,
+		regClient: registerapi.NewRegistrationClient(regConn),
+		draClient: drapb.NewDRAPluginClient(draConn),
 	}
 	grpc_health_v1.RegisterHealthServer(server, healthcheck)
 
@@ -127,16 +125,13 @@ func (h *healthcheck) Stop() {
 
 // Check implements [grpc_health_v1.HealthServer].
 func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
-	knownServices := map[string]struct{}{"": {}, "liveness": {}, "readiness": {}}
+	knownServices := map[string]struct{}{"": {}, "liveness": {}}
 	if _, known := knownServices[req.GetService()]; !known {
 		return nil, status.Error(codes.NotFound, "unknown service")
 	}
 
 	status := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING,
-	}
-	if req.GetService() == "readiness" && (h.registered == nil || !h.registered()) {
-		return status, nil
 	}
 	logger := logging.FromContext(ctx)
 
@@ -158,14 +153,4 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 
 	status.Status = grpc_health_v1.HealthCheckResponse_SERVING
 	return status, nil
-}
-
-// The helper's RegistrationStatus accessor is not synchronized in the current
-// SDK. Observe the kubelet acknowledgement on the registrar RPC instead.
-func (d *driver) observeRegistration(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	response, err := handler(ctx, req)
-	if registration, ok := req.(*registerapi.RegistrationStatus); ok {
-		d.registered.Store(registration.PluginRegistered && err == nil)
-	}
-	return response, err
 }
