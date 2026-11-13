@@ -88,7 +88,7 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		return nil, fmt.Errorf("connect to DRA socket: %w", err)
 	}
 
-	server := grpc.NewServer()
+	server := grpc.NewServer() // nosemgrep: go.grpc.security.grpc-server-insecure-connection.grpc-server-insecure-connection -- kubelet gRPC probes cannot use TLS
 	healthcheck := &healthcheck{
 		server:    server,
 		regClient: registerapi.NewRegistrationClient(regConn),
