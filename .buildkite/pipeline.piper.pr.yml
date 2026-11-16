@@ -6,10 +6,10 @@ agents:
 
 steps:
   - label: ":package: pr › upload"
-    key: piper-bundle-pr
+    # The OB file-upload step already uses piper-bundle-pr.
+    key: piper-render-pr
     secrets:
       PIPER_TOKEN: PIPER_TOKEN
     command: |
       curl -fsSL -H "Authorization: Bearer $$PIPER_TOKEN" \
         "${PIPER_URL}/api/v1/bundles/RBLN-SW/rbln-k8s-dra-driver/pr?run=$${PIPER_RUN:-}" | buildkite-agent pipeline upload
-        
