@@ -1,6 +1,12 @@
 # Single Pod Requesting One NPU
 
-This example creates one pod with one DRA claim.
+Request one whole NPU with a ResourceClaimTemplate.
+
+## Before you start
+
+Use Kubernetes 1.34 or later and [enable DRA](https://docs.rbln.ai/latest/software/system_management/kubernetes/npu_dra_driver.html).
+Confirm that `npu.rebellions.ai` exists and ResourceSlices contain an available NPU.
+This example creates the `npu-example-single` test namespace.
 
 ## Apply
 
@@ -48,9 +54,18 @@ EOF
 ## Verify
 
 ```bash
+kubectl -n npu-example-single wait pod/pod0 --for=condition=Ready --timeout=5m
 kubectl -n npu-example-single get pod,resourceclaim
 kubectl -n npu-example-single describe pod pod0
+kubectl -n npu-example-single exec pod0 -- sh -c 'ls /dev/rbln* /dev/rsd0'
 ```
+
+Expect a Ready Pod, an allocated ResourceClaim, and the allocated NPU and RSD
+device nodes. If the Pod remains Pending,
+read its scheduling events and inspect the generated claim with
+`kubectl -n npu-example-single get resourceclaim -o yaml`.
+For preparation or device-injection errors, follow the
+[allocation diagnosis guide](../docs/guides/troubleshoot-allocation.md).
 
 ## Cleanup
 
