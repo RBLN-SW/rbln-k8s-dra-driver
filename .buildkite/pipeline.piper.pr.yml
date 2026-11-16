@@ -12,4 +12,3 @@ steps:
     command: |
       curl -fsSL -H "Authorization: Bearer $$PIPER_TOKEN" \
         "${PIPER_URL}/api/v1/bundles/RBLN-SW/rbln-k8s-dra-driver/pr?run=$${PIPER_RUN:-}" | buildkite-agent pipeline upload
-        
