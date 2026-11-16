@@ -1,14 +1,26 @@
-# Usage Examples
+# DRA examples
 
-This directory contains examples for using the DRA driver.
-The Helm chart creates `npu.rebellions.ai` for physical container NPUs,
-`npu-vf1.rebellions.ai` and `npu-vf4.rebellions.ai` for the respective SR-IOV profiles,
-and `vfio-npu.rebellions.ai` for VM passthrough (vfio-pci) devices.
+Request NPUs with ResourceClaims and verify the allocation.
 
-## Example Scenarios
+## Before you start
 
-- [Single pod requesting an SR-IOV VF](single-pod-npu-vf4.md)
-- [Single pod requesting one NPU](single-pod-single-npu.md)
-- [Single pod requesting two NPUs](single-pod-double-npu.md)
-- [Two pods requesting one NPU each](two-pods-one-npu-each.md)
-- [KubeVirt VM with an NPU passed through via DRA](kubevirt-vm-passthrough.md)
+Use Kubernetes 1.34 or later and
+[enable DRA through the NPU Operator](https://docs.rbln.ai/latest/software/system_management/kubernetes/npu_dra_driver.html).
+Confirm that the selected DeviceClass and matching device inventory exist.
+Use examples from the same release as your deployment.
+
+| Goal | Guide |
+| --- | --- |
+| Run a first DRA workload | [One Pod, one NPU](single-pod-single-npu.md) |
+| Allocate multiple NPUs to one workload | [One Pod, two NPUs](single-pod-double-npu.md) |
+| Give each workload its own NPU | [Two Pods, one NPU each](two-pods-one-npu-each.md) |
+| Use a partitioned NPU | [One Pod, one VF](single-pod-npu-vf4.md) |
+| Attach an NPU to a virtual machine | [KubeVirt VM passthrough](kubevirt-vm-passthrough.md) |
+
+Container examples use `npu.rebellions.ai` for whole NPUs or a VF-specific class.
+VM examples use the corresponding `vfio-npu*` class. See the
+[device class table](../README.md#choose-a-device-class).
+
+Each guide creates a test namespace and includes cleanup.
+
+[Back to the README](../README.md)
