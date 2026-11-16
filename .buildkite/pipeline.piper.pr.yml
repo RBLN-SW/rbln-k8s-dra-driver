@@ -6,8 +6,7 @@ agents:
 
 steps:
   - label: ":package: pr › upload"
-    # The OB file-upload step already uses piper-bundle-pr.
-    key: piper-render-pr
+    key: piper-bundle-pr
     secrets:
       PIPER_TOKEN: PIPER_TOKEN
     command: |
