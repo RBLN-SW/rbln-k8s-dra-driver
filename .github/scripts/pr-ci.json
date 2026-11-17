@@ -1,6 +1,0 @@
-{
-  "repository": "RBLN-SW/rbln-k8s-dra-driver",
-  "bundle_id": "158cc953-a407-49a6-a5a0-560cd8b8fb1f",
-  "ob_pipeline": "pr-k8s-dra-driver",
-  "timeout_seconds": 10200
-}
