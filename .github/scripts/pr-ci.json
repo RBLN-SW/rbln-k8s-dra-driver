@@ -4,5 +4,10 @@
   "ob_pipeline": "pr-k8s-dra-driver",
   "timeout_seconds": 10200,
   "status_context": "[DRA] PR CI",
-  "workflow_file": ".github/workflows/trigger-pr.yaml"
+  "workflow_file": ".github/workflows/trigger-pr.yaml",
+  "gate_jobs": [
+    "lint",
+    "manifests-check",
+    "pr-title-validation"
+  ]
 }
