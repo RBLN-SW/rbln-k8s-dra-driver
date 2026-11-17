@@ -8,7 +8,7 @@ import (
 )
 
 func recreateValidatedRSDGroup(ctx context.Context, busIDs []string) (string, error) {
-	c, err := smi.New(smi.Options{})
+	c, err := smi.New(smi.Options{ReplaceIntersectingGroups: true})
 	if err != nil {
 		return "", err
 	}
