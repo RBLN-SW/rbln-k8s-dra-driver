@@ -121,6 +121,7 @@ func TestRepartitionRejectsOldAllocationWithoutClassPolicy(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(st.sysfsPCIDevicesRoot, pf, "sriov_numvfs"), []byte("1"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			completeSRIOVFixture(t, st.sysfsPCIDevicesRoot, pf, 1)
 			if _, err := st.Prepare(context.Background(), claim); err == nil {
 				t.Fatal("Prepare accepted stale live partition state")
 			}

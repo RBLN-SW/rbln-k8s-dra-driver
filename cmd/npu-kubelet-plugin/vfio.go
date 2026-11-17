@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	host "github.com/rbln-sw/rblnlib-go/pkg/host/v1"
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/utils/ptr"
@@ -33,12 +35,8 @@ import (
 const (
 	// Same selection criteria as the vfio-manager bind script in the NPU
 	// operator: Rebellions vendor with the processing-accelerator class.
-	rblnPCIVendorID = "0x1eff"
-	npuPCIClassID   = "0x120000"
 
-	vfioPCIDriverName    = "vfio-pci"
-	vfioDevDir           = "/dev/vfio"
-	vfioContainerDevPath = "/dev/vfio/vfio"
+	vfioPCIDriverName = system.VFIODriver
 
 	// Ownership applied to vfio device nodes inside the container so the
 	// QEMU process in KubeVirt's virt-launcher (uid/gid 107) can open them.
@@ -46,58 +44,26 @@ const (
 	qemuGID uint32 = 107
 )
 
-var pciDeviceIDToProductName = map[string]string{
-	"1220": "RBLN-CA22",
-	"1221": "RBLN-CA22",
-	"1250": "RBLN-CA25",
-	"1251": "RBLN-CA25",
-	"2130": "RBLN-CR13",
-	"2131": "RBLN-CR13",
-}
-
-// enumerateVfioDevices lists the Rebellions NPUs bound to vfio-pci under the
-// sysfs PCI devices root. Skipped entries are returned for startup/change
-// logging by the caller; enumeration itself does not log exclusions.
+// enumerateVfioDevices applies DRA's allocation policy to library observations.
 func enumerateVfioDevices(ctx context.Context, root string, known map[string]bool) ([]resourceapi.Device, []skippedDevice, error) {
-	entries, err := os.ReadDir(root)
+	snapshot, err := systemInventory(ctx, root, known)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read %s: %w", root, err)
+		return nil, nil, err
 	}
-
+	products, err := host.BuiltinPCIIDs()
+	if err != nil {
+		return nil, nil, err
+	}
 	var devices []resourceapi.Device
 	var skipped []skippedDevice
-	for _, entry := range entries {
-		busID := entry.Name()
-		if !pciAddressRegexp.MatchString(busID) {
+	for _, d := range snapshot.Devices {
+		busID := d.PCIAddress
+		if !d.DriverKnown {
+			return nil, nil, system.IssuesError(d.Issues)
+		}
+		if d.Driver != vfioPCIDriverName {
 			continue
 		}
-		devPath := filepath.Join(root, busID)
-
-		matches, err := isRebellionsPCI(devPath, known)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !matches {
-			continue
-		}
-		driver, err := readPCIDriver(devPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		if driver != vfioPCIDriverName {
-			continue
-		}
-		class, err := readSysfsValue(devPath, "class")
-		if err != nil {
-			if pciEntryRemoved(devPath, err) {
-				continue
-			}
-			return nil, nil, err
-		}
-		if class != npuPCIClassID {
-			continue
-		}
-
 		name := vfioDeviceName(busID)
 		sriov, err := probeSRIOV(root, busID)
 		if err != nil {
@@ -112,8 +78,7 @@ func enumerateVfioDevices(ctx context.Context, root string, known map[string]boo
 			continue
 		}
 		name = sriov.deviceName(name)
-
-		group, err := isolatedIOMMUGroup(devPath, busID)
+		group, err := isolatedIOMMUGroupContext(ctx, filepath.Join(root, busID), busID)
 		if err != nil {
 			if !errors.Is(err, errUnsupportedDevice) {
 				return nil, nil, err
@@ -121,41 +86,22 @@ func enumerateVfioDevices(ctx context.Context, root string, known map[string]boo
 			skipped = append(skipped, skippedDevice{name: name, pciBusID: busID, err: err})
 			continue
 		}
-
 		attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-			deviceTypeAttributeKey: {
-				StringValue: ptr.To(deviceTypeVfio),
-			},
-			pciBusIDAttributeKey: {
-				StringValue: ptr.To(busID),
-			},
-			iommuGroupAttributeKey: {
-				IntValue: ptr.To(group),
-			},
+			deviceTypeAttributeKey: {StringValue: ptr.To(deviceTypeVfio)},
+			pciBusIDAttributeKey:   {StringValue: ptr.To(busID)},
+			iommuGroupAttributeKey: {IntValue: ptr.To(group)},
+			"pciDeviceID":          {StringValue: ptr.To(fmt.Sprintf("%04x", d.DeviceID))},
 		}
-
-		if deviceID, err := readSysfsValue(devPath, "device"); err == nil {
-			deviceID = strings.TrimPrefix(deviceID, "0x")
-			attrs["pciDeviceID"] = resourceapi.DeviceAttribute{StringValue: ptr.To(deviceID)}
-			if productName, ok := pciDeviceIDToProductName[deviceID]; ok {
-				attrs["productName"] = resourceapi.DeviceAttribute{StringValue: ptr.To(productName)}
-			}
+		if product := products.Lookup(d.DeviceID); product != "" {
+			attrs["productName"] = resourceapi.DeviceAttribute{StringValue: ptr.To(strings.Fields(product)[0])}
 		}
-
+		if d.Topology.NUMANode != nil {
+			setNumaNodeAttr(ctx, attrs, name, strconv.Itoa(*d.Topology.NUMANode))
+		}
 		setPCIERootAttr(ctx, attrs, name, root, busID)
-
-		if numa, err := readSysfsValue(devPath, "numa_node"); err == nil {
-			setNumaNodeAttr(ctx, attrs, name, numa)
-		}
-
 		sriov.setAttributes(attrs)
-
-		devices = append(devices, resourceapi.Device{
-			Name:       name,
-			Attributes: attrs,
-		})
+		devices = append(devices, resourceapi.Device{Name: name, Attributes: attrs})
 	}
-
 	return devices, skipped, nil
 }
 
@@ -163,36 +109,27 @@ func vfioDeviceName(busID string) string {
 	return "vfio-" + strings.ToLower(strings.NewReplacer(":", "-", ".", "-").Replace(busID))
 }
 
-func deviceIOMMUGroupFromSysfs(devPath string) (int64, error) {
-	base, err := readSysfsLinkBase(devPath, "iommu_group")
+// DRA allocates one function at a time and therefore requires an exclusive group.
+func isolatedIOMMUGroup(devPath, busID string) (int64, error) {
+	return isolatedIOMMUGroupContext(context.Background(), devPath, busID)
+}
+
+func isolatedIOMMUGroupContext(ctx context.Context, devPath, busID string) (int64, error) {
+	c, err := systemHost(filepath.Dir(devPath))
 	if err != nil {
 		return 0, err
 	}
-	group, err := strconv.ParseInt(base, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("unexpected iommu group %q for %s: %w", base, devPath, err)
-	}
-	return group, nil
-}
-
-// The current allocation unit is one PCI function. Shared IOMMU groups need
-// a different allocation contract and cannot be handed to independent VMs.
-func isolatedIOMMUGroup(devPath, busID string) (int64, error) {
-	group, err := deviceIOMMUGroupFromSysfs(devPath)
-	if errors.Is(err, os.ErrNotExist) {
+	group, members, err := c.IOMMUGroup(ctx, busID)
+	if errors.Is(err, system.ErrUnsupported) {
 		return 0, fmt.Errorf("%w: no IOMMU group for %s", errUnsupportedDevice, busID)
 	}
 	if err != nil {
 		return 0, err
 	}
-	members, err := os.ReadDir(filepath.Join(devPath, "iommu_group", "devices"))
-	if err != nil {
-		return 0, err
-	}
-	if len(members) != 1 || !strings.EqualFold(members[0].Name(), busID) {
+	if len(members) != 1 || !strings.EqualFold(members[0], busID) {
 		return 0, fmt.Errorf("%w: IOMMU group %d is not exclusive to %s", errUnsupportedDevice, group, busID)
 	}
-	return group, nil
+	return int64(group), nil
 }
 
 func isVfioDevice(device resourceapi.Device) bool {
@@ -215,18 +152,22 @@ func vfioContainerEdits(ctx context.Context, device resourceapi.Device, metadata
 	}
 
 	edits := &cdispec.ContainerEdits{}
-	for _, path := range []string{vfioContainerDevPath, filepath.Join(vfioDevDir, group)} {
-		if _, err := waitForDeviceNode(ctx, path); err != nil {
-			return nil, fmt.Errorf("vfio device node %q: %w", path, err)
-		}
-		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
-			Path:        path,
-			HostPath:    path,
-			Permissions: "mrw",
-			UID:         ptr.To(qemuUID),
-			GID:         ptr.To(qemuGID),
-		})
+	id, err := strconv.ParseUint(group, 10, 32)
+	if err != nil {
+		return nil, err
 	}
+	machine, err := host.New(host.Options{})
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := machine.VFIONodes(ctx, uint32(id))
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{Path: node.Path, HostPath: node.HostPath, Permissions: "mrw", UID: ptr.To(qemuUID), GID: ptr.To(qemuGID)})
+	}
+
 	// Mount only this request's files. The host paths are claim-UID scoped;
 	// each container still sees the standard name/alias-based lookup paths.
 	edits.Mounts = append(edits.Mounts, metadataMounts...)

@@ -272,7 +272,8 @@ func TestPrepareRejectsFaultBetweenScansBeforeSideEffects(t *testing.T) {
 			allocated := st.allocatable[claim.Status.Allocation.Devices.Results[0].Device]
 			st.inventoryFn = inventoryOf(npuEntry("null", deviceStringAttr(allocated, pciBusIDAttributeKey)))
 			rescan(t, st)
-			st.rsdGroupFn = func([]string) (string, error) {
+			st.resolveNodes = fixtureNativeNodes(st)
+			st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) {
 				t.Fatal("an unhealthy device must be rejected before RSD creation")
 				return "", nil
 			}
@@ -313,7 +314,8 @@ func TestPrepareRejectsFaultBetweenScansBeforeSideEffects(t *testing.T) {
 			if !rescan(t, st) || len(st.allocatable) != 1 {
 				t.Fatal("scan must restore the device after observing READY")
 			}
-			st.rsdGroupFn = func([]string) (string, error) { return "/dev/null", nil }
+			st.resolveNodes = fixtureNativeNodes(st)
+			st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) { return "/dev/null", nil }
 			if _, err := st.Prepare(context.Background(), claim); err != nil {
 				t.Fatalf("Prepare retry after observing READY: %v", err)
 			}
@@ -348,7 +350,8 @@ func TestHealthChangesPreservePreparedClaimAndCleanup(t *testing.T) {
 	if _, err := st.Prepare(ctx, fresh); err == nil || !strings.Contains(err.Error(), "not allocatable") {
 		t.Fatalf("fresh Prepare after fault = %v", err)
 	}
-	st.rsdGroupFn = func([]string) (string, error) {
+	st.resolveNodes = fixtureNativeNodes(st)
+	st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) {
 		t.Fatal("checkpoint replay must not recreate RSD state")
 		return "", nil
 	}
@@ -368,7 +371,8 @@ func TestHealthChangesPreservePreparedClaimAndCleanup(t *testing.T) {
 	}
 	writeDeviceStatus(t, st.sysfsRebellionsClassRoot, "null", "0")
 	rescan(t, st)
-	st.rsdGroupFn = func([]string) (string, error) { return "/dev/null", nil }
+	st.resolveNodes = fixtureNativeNodes(st)
+	st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) { return "/dev/null", nil }
 	if _, err := st.Prepare(ctx, fresh); err != nil {
 		t.Fatalf("fresh Prepare after recovery: %v", err)
 	}

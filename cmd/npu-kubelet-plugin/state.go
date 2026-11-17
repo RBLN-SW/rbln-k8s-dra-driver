@@ -24,9 +24,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
+
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -76,7 +77,8 @@ type DeviceState struct {
 	driverResources   resourceslice.DriverResources
 	allocatable       AllocatableDevices
 	checkpointManager checkpointmanager.CheckpointManager
-	rsdGroupFn        func([]string) (string, error)
+	rsdGroupFn        func(context.Context, []string) (string, error)
+	resolveNodes      func(context.Context, string) ([]system.DeviceNode, error)
 	// inventoryFn reads the rbln-smi inventory; tests inject a fake.
 	inventoryFn inventoryFunc
 
@@ -98,7 +100,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 	inventoryFn := config.inventoryFn
 	if inventoryFn == nil {
-		inventoryFn = device.GetDevices
+		inventoryFn = getSystemDevices
 	}
 
 	vfioDevices, vfioSkipped, vfioErr := enumerateVfioDevices(ctx, sysfsRoot, nil)
@@ -178,7 +180,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		nodeName:                 config.flags.nodeName,
 		cdi:                      cdi,
 		checkpointManager:        checkpointManager,
-		rsdGroupFn:               func(ids []string) (string, error) { return recreateValidatedRSDGroup(ctx, ids) },
+		rsdGroupFn:               recreateValidatedRSDGroup,
 		inventoryFn:              inventoryFn,
 		npuDevices:               npuDevices,
 		vfioDevices:              vfioDevices,
@@ -460,7 +462,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			return nil, fmt.Errorf("create common CDI spec: %w", err)
 		}
 		var err error
-		hostRsdPath, err = s.rsdGroupFn(npuBusIDs)
+		hostRsdPath, err = s.rsdGroupFn(ctx, npuBusIDs)
 		if err != nil {
 			return nil, fmt.Errorf("create RSD group for %v: %w", npuBusIDs, err)
 		}
@@ -586,12 +588,26 @@ func (s *DeviceState) applyConfig(ctx context.Context, deviceName, hostRsdPath s
 	if nodeName == "" || nodeName == "." || nodeName == ".." || filepath.Base(nodeName) != nodeName {
 		return nil, fmt.Errorf("invalid native device node name %q for %s", nodeName, deviceName)
 	}
-	rblnPath := filepath.Join("/dev", nodeName)
-	rblnNode, err := newDeviceNode(ctx, rblnPath, rblnPath)
+	address, err := devicePCIBusID(allocatable)
 	if err != nil {
-		return nil, fmt.Errorf("rbln device node: %w", err)
+		return nil, err
 	}
-	edits.DeviceNodes = append(edits.DeviceNodes, rblnNode)
+	resolve := s.resolveNodes
+	if resolve == nil {
+		resolve = nativeSystemNodes
+	}
+	nodes, err := resolve(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		nativeNode, err := newDeviceNode(ctx, node.Path, node.HostPath)
+		if err != nil {
+			return nil, err
+		}
+		edits.DeviceNodes = append(edits.DeviceNodes, nativeNode)
+	}
+
 	return edits, nil
 }
 
@@ -693,18 +709,22 @@ func npuDevicesFromInventory(ctx context.Context, sysfsRoot string, devs []devic
 	var devices []resourceapi.Device
 	var skipped []skippedDevice
 	for _, d := range devs {
-		devPath := filepath.Join(sysfsRoot, strings.ToLower(d.PCIBusID))
-		if _, err := os.Stat(devPath); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+		machine, err := systemHost(sysfsRoot)
+		if err != nil {
+			return nil, nil, err
+		}
+		observed, err := machine.GetDevice(ctx, d.PCIBusID)
+		if err != nil {
+			if errors.Is(err, system.ErrNotFound) {
 				skipped = append(skipped, skippedDevice{name: d.Name, pciBusID: d.PCIBusID, err: err})
 				continue
 			}
 			return nil, nil, err
 		}
-		driver, err := readPCIDriver(devPath)
-		if err != nil {
-			return nil, nil, err
+		if !observed.DriverKnown {
+			return nil, nil, system.IssuesError(observed.Issues)
 		}
+		driver := observed.Driver
 		if driver != nativePCIDriverName {
 			continue
 		}

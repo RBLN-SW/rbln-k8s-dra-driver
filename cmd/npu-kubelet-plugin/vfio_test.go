@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,6 +53,38 @@ type fakePCIDevice struct {
 func writeFakeSysfs(t *testing.T, devices []fakePCIDevice) string {
 	t.Helper()
 
+	// Fill unbound siblings so a requested VF profile has a complete kernel
+	// topology, even when only selected functions are advertised by the test.
+	original := append([]fakePCIDevice(nil), devices...)
+	present := map[string]bool{}
+	for _, d := range devices {
+		present[d.busID] = true
+	}
+	for _, pf := range original {
+		count, err := strconv.Atoi(strings.TrimSpace(pf.numVFs))
+		if err != nil || count <= 0 || pf.physfnOf != "" {
+			continue
+		}
+		children := 0
+		for _, d := range devices {
+			if d.physfnOf == pf.busID {
+				children++
+			}
+		}
+		for index := 1; children < count; index++ {
+			address := strings.TrimSuffix(pf.busID, ".0") + fmt.Sprintf(".%d", index)
+			if present[address] {
+				continue
+			}
+			d := nativeVF(address, pf.busID)
+			d.driver = ""
+			d.iommuGroup = ""
+			d.rootPort = pf.rootPort
+			devices = append(devices, d)
+			present[address] = true
+			children++
+		}
+	}
 	dir := t.TempDir()
 	busDir := filepath.Join(dir, "sys", "bus", "pci", "devices")
 	if err := os.MkdirAll(busDir, 0o755); err != nil {
@@ -104,12 +137,28 @@ func writeFakeSysfs(t *testing.T, devices []fakePCIDevice) string {
 		}
 
 		if dev.physfnOf != "" {
-			if err := os.Symlink("../"+dev.physfnOf, filepath.Join(devDir, "physfn")); err != nil {
+			if err := os.Symlink(filepath.Join(busDir, dev.physfnOf), filepath.Join(devDir, "physfn")); err != nil {
 				t.Fatal(err)
 			}
 		}
 
 		if err := os.Symlink(devDir, filepath.Join(busDir, dev.busID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	indexes := map[string]int{}
+	for _, d := range devices {
+		if d.physfnOf == "" {
+			continue
+		}
+		parent := filepath.Join(busDir, d.physfnOf)
+		if _, err := os.Stat(parent); err != nil {
+			continue
+		}
+		link := filepath.Join(parent, fmt.Sprintf("virtfn%d", indexes[d.physfnOf]))
+		indexes[d.physfnOf]++
+		if err := os.Symlink(filepath.Join(busDir, d.busID), link); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -293,6 +342,12 @@ func TestEnumerateVfioDevicesExcludesUnsupportedSRIOV(t *testing.T) {
 		t.Run("parent count "+count, func(t *testing.T) {
 			root := writeFakeSysfs(t, []fakePCIDevice{nativeDevice(pf, count), vfioVF("0000:27:00.1", pf)})
 			devices, _, err := enumerateVfioDevices(context.Background(), root, nil)
+			if count == "0" {
+				if err == nil {
+					t.Fatal("inconsistent zero-VF topology must fail observation")
+				}
+				return
+			}
 			if err != nil || len(devices) != 0 {
 				t.Fatalf("enumeration = %v, %v", devices, err)
 			}

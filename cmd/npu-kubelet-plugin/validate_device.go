@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 
 	resourceapi "k8s.io/api/resource/v1"
 )
@@ -17,21 +20,22 @@ func validateAllocatedDevice(root string, d resourceapi.Device) error {
 		return err
 	}
 	devPath := filepath.Join(root, strings.ToLower(bus))
-	vendor, err := readSysfsValue(devPath, "vendor")
+	machine, err := systemHost(root)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(vendor, rblnPCIVendorID) {
-		return fmt.Errorf("PCI vendor changed for %s", bus)
+	observed, err := machine.GetDevice(context.Background(), bus)
+	if err != nil {
+		return err
 	}
 	wantDriver := nativePCIDriverName
 	if isVfioDevice(d) {
 		wantDriver = vfioPCIDriverName
 	}
-	driver, err := readPCIDriver(devPath)
-	if err != nil {
-		return err
+	if !observed.DriverKnown {
+		return system.IssuesError(observed.Issues)
 	}
+	driver := observed.Driver
 	if driver != wantDriver {
 		return fmt.Errorf("PCI driver for %s is %q, expected %q", bus, driver, wantDriver)
 	}

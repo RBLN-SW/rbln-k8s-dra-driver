@@ -3,31 +3,26 @@ package main
 import (
 	"testing"
 
-	"github.com/rbln-sw/rblnlib-go/pkg/rblnsmi"
+	smi "github.com/rbln-sw/rblnlib-go/pkg/smi/v1"
 )
 
 func TestRSDMembershipRequiresExactlyTheRequestedDevices(t *testing.T) {
-	member := func(bus, group string) rblnsmi.Device {
-		return rblnsmi.Device{GroupID: group, PCI: rblnsmi.PCIInfo{BusID: bus}}
-	}
 	expected := []string{"0000:0A:00.1", "0000:0A:00.2"}
 	for _, tc := range []struct {
 		name    string
-		path    string
-		devices []rblnsmi.Device
+		id      uint32
+		groups  []smi.Group
 		wantErr bool
 	}{
-		{"complete", "/dev/rsd1", []rblnsmi.Device{member("0000:0a:00.2", "1"), member("0000:0a:00.1", "1"), member("0000:0b:00.1", "2")}, false},
-		{"partial library success", "/dev/rsd1", []rblnsmi.Device{member("0000:0a:00.1", "1")}, true},
-		{"extra foreign VF", "/dev/rsd1", []rblnsmi.Device{member("0000:0a:00.1", "1"), member("0000:0a:00.2", "1"), member("0000:0b:00.1", "1")}, true},
-		{"wrong group", "/dev/rsd1", []rblnsmi.Device{member("0000:0a:00.1", "2"), member("0000:0a:00.2", "2")}, true},
-		{"duplicate", "/dev/rsd1", []rblnsmi.Device{member("0000:0a:00.1", "1"), member("0000:0a:00.1", "1")}, true},
-		{"host group forbidden", "/dev/rsd0", nil, true},
-		{"empty result", "", nil, true},
-		{"invalid path", "/dev/rsd../other", nil, true},
+		{"complete", 1, []smi.Group{{ID: 1, PCIAddresses: []string{"0000:0a:00.2", "0000:0a:00.1"}}, {ID: 2, PCIAddresses: []string{"0000:0b:00.1"}}}, false},
+		{"partial", 1, []smi.Group{{ID: 1, PCIAddresses: []string{"0000:0a:00.1"}}}, true},
+		{"extra foreign VF", 1, []smi.Group{{ID: 1, PCIAddresses: []string{"0000:0a:00.1", "0000:0a:00.2", "0000:0b:00.1"}}}, true},
+		{"wrong group", 1, []smi.Group{{ID: 2, PCIAddresses: expected}}, true},
+		{"duplicate", 1, []smi.Group{{ID: 1, PCIAddresses: []string{"0000:0a:00.1", "0000:0a:00.1"}}}, true},
+		{"default forbidden", 0, nil, true}, {"empty result", 1, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateRSDMembership(tc.path, expected, &rblnsmi.RblnSmi{Devices: tc.devices})
+			err := smi.ValidateGroupMembers(tc.id, expected, tc.groups)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
 			}

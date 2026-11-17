@@ -17,84 +17,60 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
+
+	host "github.com/rbln-sw/rblnlib-go/pkg/host/v1"
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 )
 
 const (
 	sysfsPCIDevicesRoot = "/sys/bus/pci/devices"
-	nativePCIDriverName = "rebellions"
+	nativePCIDriverName = system.NativeDriver
 )
 
-// An entry disappearing during enumeration is an observed removal. A missing
-// required attribute on an existing entry is a failed read, not a removal.
-func pciEntryRemoved(devPath string, err error) bool {
-	if !errors.Is(err, os.ErrNotExist) {
-		return false
+func systemHost(root string) (*host.Client, error) {
+	if root == "" {
+		root = sysfsPCIDevicesRoot
 	}
-	_, statErr := os.Stat(devPath)
-	return errors.Is(statErr, os.ErrNotExist)
-}
-
-// Unknown vendors are outside the inventory. For a previously published NPU,
-// a failed vendor read is not evidence that the function has disappeared.
-func isRebellionsPCI(devPath string, known map[string]bool) (bool, error) {
-	vendor, err := readSysfsValue(devPath, "vendor")
+	absolute, err := filepath.Abs(root)
 	if err != nil {
-		if known[strings.ToLower(filepath.Base(devPath))] && !pciEntryRemoved(devPath, err) {
-			return false, fmt.Errorf("read vendor for known NPU %s: %w", filepath.Base(devPath), err)
+		return nil, err
+	}
+	return host.New(host.Options{PCIDevicesRoot: absolute})
+}
+func systemInventory(ctx context.Context, root string, known map[string]bool) (system.Snapshot, error) {
+	c, err := systemHost(root)
+	if err != nil {
+		return system.Snapshot{}, err
+	}
+	s, err := c.ListDevices(ctx)
+	if err != nil {
+		return s, err
+	}
+	for _, issue := range s.Issues {
+		var e *system.Error
+		if errors.As(issue.Err, &e) && e.Op == "device" && e.Kind == system.NotFound {
+			continue
 		}
-		return false, nil
+		// Unknown functions with unreadable identity have never been advertised.
+		if !known[issue.Target] {
+			continue
+		}
+		return s, issue.Err
 	}
-	return strings.EqualFold(vendor, rblnPCIVendorID), nil
+	return s, nil
 }
 
-func readPCIDriver(devPath string) (string, error) {
-	driver, err := readSysfsLinkBase(devPath, "driver")
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	} // unbound function
-	return driver, err
-}
-
-var pciAddressRegexp = regexp.MustCompile(`^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$`)
-
-// pciRootRegexp matches the root complex segment ("pci<domain>:<bus>") that
-// leads a device's /sys/devices path, the value format required by the
-// standard resource.kubernetes.io/pcieRoot attribute (KEP-4381).
-var pciRootRegexp = regexp.MustCompile(`^pci[0-9a-fA-F]{4}:[0-9a-fA-F]{2}$`)
-
-func readSysfsValue(devPath, name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(devPath, name))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-func readSysfsLinkBase(devPath, name string) (string, error) {
-	target, err := os.Readlink(filepath.Join(devPath, name))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Base(target), nil
-}
-
-// resolvePCIERootID resolves the PCIe root complex ("pci<domain>:<bus>") a
-// device hangs off of by walking the physical device path in sysfs.
 func resolvePCIERootID(root, busID string) (string, error) {
-	resolvedPath, err := filepath.EvalSymlinks(filepath.Join(root, strings.ToLower(busID)))
+	c, err := systemHost(root)
 	if err != nil {
 		return "", err
 	}
-	for segment := range strings.SplitSeq(filepath.Clean(resolvedPath), string(filepath.Separator)) {
-		if pciRootRegexp.MatchString(segment) {
-			return segment, nil
-		}
+	paths, err := c.PCIAncestors(context.Background(), busID)
+	if err != nil {
+		return "", err
 	}
-	return "", nil
+	return filepath.Base(paths[0]), nil
 }
