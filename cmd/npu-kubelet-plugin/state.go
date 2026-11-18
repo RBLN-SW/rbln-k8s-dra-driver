@@ -119,7 +119,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	var npuDevices []resourceapi.Device
 	var npuSkipped []skippedDevice
 	var npuErr error
-	if candidates, err := countNativeCandidates(sysfsRoot, nil); err != nil || candidates > 0 {
+	if candidates, err := countNativeCandidates(ctx, sysfsRoot, nil); err != nil || candidates > 0 {
 		npuDevices, npuSkipped, npuErr = enumerateNpuDevices(ctx, sysfsRoot, inventoryFn)
 	} else {
 		logger.Info("No NPU bound to the native driver, skipping rbln-smi", "vfioDeviceCount", len(vfioDevices))
@@ -423,7 +423,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		if result.Pool != s.nodeName {
 			return nil, fmt.Errorf("allocated pool %q does not match this node %q", result.Pool, s.nodeName)
 		}
-		if err := validateAllocatedDevice(s.sysfsPCIDevicesRoot, allocated); err != nil {
+		if err := validateAllocatedDevice(ctx, s.sysfsPCIDevicesRoot, allocated); err != nil {
 			return nil, fmt.Errorf("allocated device %s is unavailable: %w", result.Device, err)
 		}
 		// Recheck before any CDI/RSD side effects: status may have changed
@@ -680,7 +680,7 @@ func setNumaNodeAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]re
 // cross-driver matchAttribute with DraNet NICs works. Returns the value set,
 // or "" when none was.
 func setPCIERootAttr(ctx context.Context, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, deviceName, sysfsRoot, busID string) string {
-	pcieRoot, err := resolvePCIERootID(sysfsRoot, busID)
+	pcieRoot, err := resolvePCIERootID(ctx, sysfsRoot, busID)
 	if err == nil && pcieRoot == "" {
 		err = errors.New("no pci<domain>:<bus> segment in the device path")
 	}
@@ -728,7 +728,7 @@ func npuDevicesFromInventory(ctx context.Context, sysfsRoot string, devs []devic
 		if driver != nativePCIDriverName {
 			continue
 		}
-		sriov, err := probeSRIOV(sysfsRoot, d.PCIBusID)
+		sriov, err := probeSRIOV(ctx, sysfsRoot, d.PCIBusID)
 		if err != nil {
 			if !errors.Is(err, errUnsupportedDevice) {
 				return nil, nil, err

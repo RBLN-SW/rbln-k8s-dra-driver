@@ -74,7 +74,7 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 	vfioDevices, vfioSkipped, err := enumerateVfioDevices(ctx, s.sysfsPCIDevicesRoot, known)
 	var candidates int
 	if err == nil {
-		candidates, err = countNativeCandidates(s.sysfsPCIDevicesRoot, known)
+		candidates, err = countNativeCandidates(ctx, s.sysfsPCIDevicesRoot, known)
 	}
 	if err != nil {
 		if !s.scan.sysfsFailing {
@@ -214,8 +214,8 @@ func logSkippedDevices(ctx context.Context, skipped []skippedDevice) {
 // state of a VM-passthrough node in both PF and VF mode. A VF-hosting PF
 // remains a control function even when bound to the native driver. Required
 // reads of known Rebellions functions fail the scan instead of reporting zero.
-func countNativeCandidates(root string, known map[string]bool) (int, error) {
-	snapshot, err := systemInventory(context.Background(), root, known)
+func countNativeCandidates(ctx context.Context, root string, known map[string]bool) (int, error) {
+	snapshot, err := systemInventory(ctx, root, known)
 	if err != nil {
 		return 0, err
 	}

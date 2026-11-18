@@ -62,12 +62,12 @@ func systemInventory(ctx context.Context, root string, known map[string]bool) (s
 	return s, nil
 }
 
-func resolvePCIERootID(root, busID string) (string, error) {
+func resolvePCIERootID(ctx context.Context, root, busID string) (string, error) {
 	c, err := systemHost(root)
 	if err != nil {
 		return "", err
 	}
-	paths, err := c.PCIAncestors(context.Background(), busID)
+	paths, err := c.PCIAncestors(ctx, busID)
 	if err != nil {
 		return "", err
 	}

@@ -65,7 +65,7 @@ func enumerateVfioDevices(ctx context.Context, root string, known map[string]boo
 			continue
 		}
 		name := vfioDeviceName(busID)
-		sriov, err := probeSRIOV(root, busID)
+		sriov, err := probeSRIOV(ctx, root, busID)
 		if err != nil {
 			if !errors.Is(err, errUnsupportedDevice) {
 				return nil, nil, err
@@ -78,7 +78,7 @@ func enumerateVfioDevices(ctx context.Context, root string, known map[string]boo
 			continue
 		}
 		name = sriov.deviceName(name)
-		group, err := isolatedIOMMUGroupContext(ctx, filepath.Join(root, busID), busID)
+		group, err := isolatedIOMMUGroup(ctx, filepath.Join(root, busID), busID)
 		if err != nil {
 			if !errors.Is(err, errUnsupportedDevice) {
 				return nil, nil, err
@@ -110,11 +110,7 @@ func vfioDeviceName(busID string) string {
 }
 
 // DRA allocates one function at a time and therefore requires an exclusive group.
-func isolatedIOMMUGroup(devPath, busID string) (int64, error) {
-	return isolatedIOMMUGroupContext(context.Background(), devPath, busID)
-}
-
-func isolatedIOMMUGroupContext(ctx context.Context, devPath, busID string) (int64, error) {
+func isolatedIOMMUGroup(ctx context.Context, devPath, busID string) (int64, error) {
 	c, err := systemHost(filepath.Dir(devPath))
 	if err != nil {
 		return 0, err

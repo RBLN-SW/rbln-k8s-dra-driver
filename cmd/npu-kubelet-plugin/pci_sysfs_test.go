@@ -56,7 +56,7 @@ func TestResolvePCIERootID(t *testing.T) {
 			}
 
 			for _, query := range []string{tc.busID, strings.ToUpper(tc.busID)} {
-				got, err := resolvePCIERootID(busDir, query)
+				got, err := resolvePCIERootID(t.Context(), busDir, query)
 				if err != nil {
 					t.Fatal(err)
 				}

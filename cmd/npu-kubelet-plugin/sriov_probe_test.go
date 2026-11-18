@@ -78,7 +78,7 @@ func TestProbeSRIOV(t *testing.T) {
 				linkSRIOVVF(t, root, "0000:17:00.1", busID)
 				busID = "0000:17:00.1"
 			}
-			got, err := probeSRIOV(root, busID)
+			got, err := probeSRIOV(t.Context(), root, busID)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("probe = %+v, %v", got, err)
 			}
@@ -105,7 +105,7 @@ func TestProbeSRIOVRejectsIncompleteSysfs(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := probeSRIOV(root, busID); err == nil {
+			if _, err := probeSRIOV(t.Context(), root, busID); err == nil {
 				t.Fatal("incomplete sysfs must fail closed")
 			}
 		})

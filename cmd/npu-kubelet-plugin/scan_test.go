@@ -124,7 +124,7 @@ func TestCountNativeCandidates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := writeFakeSysfs(t, tc.devices)
-			got, err := countNativeCandidates(root, nil)
+			got, err := countNativeCandidates(t.Context(), root, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -136,7 +136,7 @@ func TestCountNativeCandidates(t *testing.T) {
 }
 
 func TestCountNativeCandidatesFailsWhenSysfsUnreadable(t *testing.T) {
-	if _, err := countNativeCandidates(filepath.Join(t.TempDir(), "missing"), nil); err == nil {
+	if _, err := countNativeCandidates(t.Context(), filepath.Join(t.TempDir(), "missing"), nil); err == nil {
 		t.Fatal("unreadable sysfs must be an error, not zero candidates")
 	}
 }

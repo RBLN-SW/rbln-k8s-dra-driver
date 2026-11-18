@@ -33,12 +33,12 @@ func (s sriovInfo) isHostingPF() bool { return !s.isVF() && s.numVFs > 0 }
 // A physfn symlink identifies a VF; its parent's sriov_numvfs defines the
 // partition mode. A PF with enabled VFs is not a compute endpoint. Missing PCI
 // entries and incomplete or unsupported VF configurations fail closed.
-func probeSRIOV(root, busID string) (sriovInfo, error) {
+func probeSRIOV(ctx context.Context, root, busID string) (sriovInfo, error) {
 	c, err := systemHost(root)
 	if err != nil {
 		return sriovInfo{}, err
 	}
-	fact, err := c.ReadSRIOV(context.Background(), busID)
+	fact, err := c.ReadSRIOV(ctx, busID)
 	if err != nil {
 		return sriovInfo{}, err
 	}
