@@ -137,7 +137,8 @@ func TestNpuInventoryPreservesPCIBusIDForRSD(t *testing.T) {
 			st := prepareStateFor(t, "/dev/null")
 			st.sysfsPCIDevicesRoot = root
 			st.allocatable = AllocatableDevices{devices[0].Name: devices[0]}
-			st.rsdGroupFn = func(ids []string) (string, error) {
+			st.resolveNodes = fixtureNativeNodes(st)
+			st.rsdGroupFn = func(_ context.Context, ids []string) (string, error) {
 				if !reflect.DeepEqual(ids, []string{reportedBusID}) {
 					t.Fatalf("RSD must receive the original inventory address, got %v", ids)
 				}
@@ -159,7 +160,8 @@ func TestPrepareSRIOVUsesVFAddressesAndNodes(t *testing.T) {
 	st.inventoryFn = inventoryOf(npuEntry("null", "0000:17:00.1"), npuEntry("zero", "0000:17:00.2"))
 	rescan(t, st)
 	var addresses []string
-	st.rsdGroupFn = func(ids []string) (string, error) {
+	st.resolveNodes = fixtureNativeNodes(st)
+	st.rsdGroupFn = func(_ context.Context, ids []string) (string, error) {
 		addresses = ids
 		return "/dev/null", nil
 	}

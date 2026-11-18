@@ -88,7 +88,7 @@ func TestValidateAllocatedDevice(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					err = validateAllocatedDevice(root, devices[0])
+					err = validateAllocatedDevice(t.Context(), root, devices[0])
 					if (err != nil) != (change != "unchanged") {
 						t.Fatalf("validation after %s: %v", change, err)
 					}
@@ -121,6 +121,7 @@ func TestRepartitionRejectsOldAllocationWithoutClassPolicy(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(st.sysfsPCIDevicesRoot, pf, "sriov_numvfs"), []byte("1"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			completeSRIOVFixture(t, st.sysfsPCIDevicesRoot, pf, 1)
 			if _, err := st.Prepare(context.Background(), claim); err == nil {
 				t.Fatal("Prepare accepted stale live partition state")
 			}
@@ -132,7 +133,7 @@ func TestRepartitionRejectsOldAllocationWithoutClassPolicy(t *testing.T) {
 			if _, err := st.Prepare(context.Background(), claim); err == nil {
 				t.Fatal("old allocation was reinterpreted as VF1")
 			}
-			if err := validateAllocatedDevice(st.sysfsPCIDevicesRoot, st.allocatable[newName]); err != nil {
+			if err := validateAllocatedDevice(t.Context(), st.sysfsPCIDevicesRoot, st.allocatable[newName]); err != nil {
 				t.Fatal(err)
 			}
 			if rescan(t, st) {

@@ -1,12 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
+
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/utils/ptr"
@@ -34,58 +33,26 @@ func (s sriovInfo) isHostingPF() bool { return !s.isVF() && s.numVFs > 0 }
 // A physfn symlink identifies a VF; its parent's sriov_numvfs defines the
 // partition mode. A PF with enabled VFs is not a compute endpoint. Missing PCI
 // entries and incomplete or unsupported VF configurations fail closed.
-func probeSRIOV(root, busID string) (sriovInfo, error) {
-	if !pciAddressRegexp.MatchString(busID) {
-		return sriovInfo{}, fmt.Errorf("invalid PCI address %q", busID)
-	}
-	// Normalize only the sysfs lookup; inventory IDs are also used for RSD matching.
-	devPath := filepath.Join(root, strings.ToLower(busID))
-	if _, err := os.Stat(devPath); err != nil {
-		return sriovInfo{}, fmt.Errorf("stat PCI device %s: %w", busID, err)
-	}
-	if _, statErr := os.Lstat(filepath.Join(devPath, "physfn")); statErr == nil {
-		parent, err := readSysfsLinkBase(devPath, "physfn")
-		if err != nil {
-			return sriovInfo{}, fmt.Errorf("read physfn of %s: %w", busID, err)
-		}
-		if !pciAddressRegexp.MatchString(parent) || strings.EqualFold(parent, busID) {
-			return sriovInfo{}, fmt.Errorf("invalid parent PF %q for VF %s", parent, busID)
-		}
-		numVFs, err := readSRIOVNumVFs(filepath.Join(root, parent))
-		if err != nil {
-			return sriovInfo{}, fmt.Errorf("read parent PF %s for VF %s: %w", parent, busID, err)
-		}
-		if numVFs != 1 && numVFs != 4 {
-			return sriovInfo{}, fmt.Errorf("%w: PF %s has %d VFs (expected 1 or 4)", errUnsupportedDevice, parent, numVFs)
-		}
-		return sriovInfo{parentPCIBusID: parent, numVFs: numVFs}, nil
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return sriovInfo{}, fmt.Errorf("stat physfn of %s: %w", busID, statErr)
-	}
-	numVFs, err := readSRIOVNumVFs(devPath)
-	if errors.Is(err, os.ErrNotExist) {
-		// Older hardware does not expose SR-IOV attributes.
-		return sriovInfo{}, nil
-	}
+func probeSRIOV(ctx context.Context, root, busID string) (sriovInfo, error) {
+	c, err := systemHost(root)
 	if err != nil {
 		return sriovInfo{}, err
 	}
-	if numVFs != 0 && numVFs != 1 && numVFs != 4 {
-		return sriovInfo{}, fmt.Errorf("%w: PF %s has %d VFs (expected 0, 1 or 4)", errUnsupportedDevice, busID, numVFs)
-	}
-	return sriovInfo{numVFs: numVFs}, nil
-}
-
-func readSRIOVNumVFs(devPath string) (int64, error) {
-	raw, err := readSysfsValue(devPath, "sriov_numvfs")
+	fact, err := c.ReadSRIOV(ctx, busID)
 	if err != nil {
-		return 0, err
+		return sriovInfo{}, err
 	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("invalid sriov_numvfs %q in %s", raw, devPath)
+	count := int64(fact.EnabledVFs)
+	if fact.ParentEnabledVFs != nil {
+		count = int64(*fact.ParentEnabledVFs)
 	}
-	return n, nil
+	if fact.Kind == system.VirtualFunction && count != 1 && count != 4 {
+		return sriovInfo{}, fmt.Errorf("%w: PF %s has %d VFs", errUnsupportedDevice, fact.ParentPCIAddress, count)
+	}
+	if fact.Kind == system.PhysicalFunction && count != 0 && count != 1 && count != 4 {
+		return sriovInfo{}, fmt.Errorf("%w: PF %s has %d VFs", errUnsupportedDevice, busID, count)
+	}
+	return sriovInfo{parentPCIBusID: fact.ParentPCIAddress, numVFs: count}, nil
 }
 
 func (s sriovInfo) partitionMode() string {

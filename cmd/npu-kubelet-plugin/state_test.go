@@ -25,7 +25,8 @@ func prepareStateFor(t *testing.T, rsdPath string) *DeviceState {
 	st.nodeName = "node-1"
 	st.sysfsPCIDevicesRoot = writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:4d:00.0", "0")})
 	st.cdi = cdiHandlerWithRuntimeSpec(t)
-	st.rsdGroupFn = func([]string) (string, error) { return rsdPath, nil }
+	st.resolveNodes = fixtureNativeNodes(st)
+	st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) { return rsdPath, nil }
 	st.allocatable = AllocatableDevices{
 		"null": {
 			Name: "null",
@@ -65,7 +66,8 @@ func TestPrepareRejectsFailedRSDGroup(t *testing.T) {
 			for _, groupErr := range []error{nil, errors.New("group creation failed")} {
 				st := prepareStateFor(t, "")
 				st.allocatable["null"].Attributes[deviceTypeAttributeKey] = resourceapi.DeviceAttribute{StringValue: ptr.To(deviceType)}
-				st.rsdGroupFn = func([]string) (string, error) { return "", groupErr }
+				st.resolveNodes = fixtureNativeNodes(st)
+				st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) { return "", groupErr }
 				devices, err := st.Prepare(context.Background(), allocatedClaim())
 				if err == nil || !strings.Contains(err.Error(), "RSD group") || len(devices) != 0 {
 					t.Fatalf("Prepare = %v, %v; want no devices and RSD error", devices, err)

@@ -42,6 +42,11 @@ func TestResolvePCIERootID(t *testing.T) {
 			if err := os.MkdirAll(devDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
+			for name, value := range map[string]string{"vendor": rblnPCIVendorID, "class": npuPCIClassID, "device": "0x2130"} {
+				if err := os.WriteFile(filepath.Join(devDir, name), []byte(value), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			busDir := filepath.Join(dir, "sys", "bus", "pci", "devices")
 			if err := os.MkdirAll(busDir, 0o755); err != nil {
 				t.Fatal(err)
@@ -51,7 +56,7 @@ func TestResolvePCIERootID(t *testing.T) {
 			}
 
 			for _, query := range []string{tc.busID, strings.ToUpper(tc.busID)} {
-				got, err := resolvePCIERootID(busDir, query)
+				got, err := resolvePCIERootID(t.Context(), busDir, query)
 				if err != nil {
 					t.Fatal(err)
 				}

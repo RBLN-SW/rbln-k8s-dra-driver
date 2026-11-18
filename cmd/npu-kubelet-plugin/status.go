@@ -2,27 +2,13 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
+
+	host "github.com/rbln-sw/rblnlib-go/pkg/host/v1"
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 
 	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/logging"
 	resourceapi "k8s.io/api/resource/v1"
-)
-
-// Only READY is available for a new allocation. An unreadable status preserves
-// the last allocation health; without a known fault it fails open, including
-// on VFs whose kernel driver does not expose this file.
-// Values mirror the kernel rbln_dev_status and rblnmlDeviceStatus_t enums.
-const (
-	deviceStatusReady   = 0
-	deviceStatusBusy    = 1
-	deviceStatusProbing = 2
-	deviceStatusInit    = 3
-	deviceStatusFault   = 4
-	deviceStatusFinish  = 5
 )
 
 const deviceStatusUnreadable = "UNREADABLE"
@@ -32,42 +18,21 @@ type deviceHealth struct {
 	status    string
 }
 
-// deviceStatusName names raw kernel lifecycle states for diagnostics.
-func deviceStatusName(status int) string {
-	switch status {
-	case deviceStatusReady:
-		return "READY"
-	case deviceStatusBusy:
-		return "BUSY"
-	case deviceStatusProbing:
-		return "PROBING"
-	case deviceStatusInit:
-		return "INIT"
-	case deviceStatusFault:
-		return "FAULT"
-	case deviceStatusFinish:
-		return "FINISH"
-	default:
-		return fmt.Sprintf("UNKNOWN(%d)", status)
-	}
-}
-
 func healthForDevice(ctx context.Context, root, deviceName string) deviceHealth {
 	if root == "" {
 		root = "/sys/class/rebellions"
 	}
-	statusPath := filepath.Join(root, deviceName, "status")
-	raw, err := os.ReadFile(statusPath)
-	var status int
-	if err == nil {
-		status, err = strconv.Atoi(strings.TrimSpace(string(raw)))
-	}
+	machine, err := host.New(host.Options{RebellionsClassRoot: root, AccelClassRoot: filepath.Join(filepath.Dir(root), "accel")})
 	if err != nil {
-		logging.FromContext(ctx).Debug("Failed to read device status",
-			"device", deviceName, "path", statusPath, "err", err)
 		return deviceHealth{status: deviceStatusUnreadable}
 	}
-	return deviceHealth{unhealthy: status != deviceStatusReady, status: deviceStatusName(status)}
+	observed, err := machine.ReadNamedState(ctx, deviceName)
+	if err != nil {
+		logging.FromContext(ctx).Debug("Failed to read device status", "device", deviceName, "err", err)
+		return deviceHealth{status: deviceStatusUnreadable}
+	}
+	return deviceHealth{unhealthy: observed.State != system.StateReady, status: observed.String()}
+
 }
 
 // Callers hold the state lock (or are initializing it). Scan and Prepare share

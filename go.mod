@@ -5,7 +5,7 @@ go 1.26.10
 require (
 	github.com/go-logr/logr v1.4.3
 	github.com/golang/glog v1.2.5
-	github.com/rbln-sw/rblnlib-go v0.3.0
+	github.com/rbln-sw/rblnlib-go v0.4.0
 	github.com/urfave/cli/v2 v2.25.3
 	google.golang.org/grpc v1.83.2
 	gopkg.in/yaml.v3 v3.0.1

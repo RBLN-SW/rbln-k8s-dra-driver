@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+
+	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -75,7 +74,7 @@ func (s *DeviceState) RescanDevices(ctx context.Context) (resourceslice.DriverRe
 	vfioDevices, vfioSkipped, err := enumerateVfioDevices(ctx, s.sysfsPCIDevicesRoot, known)
 	var candidates int
 	if err == nil {
-		candidates, err = countNativeCandidates(s.sysfsPCIDevicesRoot, known)
+		candidates, err = countNativeCandidates(ctx, s.sysfsPCIDevicesRoot, known)
 	}
 	if err != nil {
 		if !s.scan.sysfsFailing {
@@ -215,36 +214,23 @@ func logSkippedDevices(ctx context.Context, skipped []skippedDevice) {
 // state of a VM-passthrough node in both PF and VF mode. A VF-hosting PF
 // remains a control function even when bound to the native driver. Required
 // reads of known Rebellions functions fail the scan instead of reporting zero.
-func countNativeCandidates(root string, known map[string]bool) (int, error) {
-	entries, err := os.ReadDir(root)
+func countNativeCandidates(ctx context.Context, root string, known map[string]bool) (int, error) {
+	snapshot, err := systemInventory(ctx, root, known)
 	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", root, err)
+		return 0, err
 	}
 	count := 0
-	for _, entry := range entries {
-		if !pciAddressRegexp.MatchString(entry.Name()) {
+	for _, d := range snapshot.Devices {
+		if !d.DriverKnown {
+			return 0, system.IssuesError(d.Issues)
+		}
+		if d.Driver != nativePCIDriverName {
 			continue
 		}
-		devPath := filepath.Join(root, entry.Name())
-		matches, err := isRebellionsPCI(devPath, known)
-		if err != nil {
-			return 0, err
+		if d.SRIOV == nil {
+			return 0, system.IssuesError(d.Issues)
 		}
-		if !matches {
-			continue
-		}
-		driver, err := readPCIDriver(devPath)
-		if err != nil {
-			return 0, err
-		}
-		if driver != nativePCIDriverName {
-			continue
-		}
-		numVFs, err := readSRIOVNumVFs(devPath)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return 0, err
-		}
-		if numVFs > 0 {
+		if d.SRIOV.Kind == system.PhysicalFunction && d.SRIOV.EnabledVFs > 0 {
 			continue
 		}
 		count++

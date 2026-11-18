@@ -124,7 +124,7 @@ func TestCountNativeCandidates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := writeFakeSysfs(t, tc.devices)
-			got, err := countNativeCandidates(root, nil)
+			got, err := countNativeCandidates(t.Context(), root, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -136,7 +136,7 @@ func TestCountNativeCandidates(t *testing.T) {
 }
 
 func TestCountNativeCandidatesFailsWhenSysfsUnreadable(t *testing.T) {
-	if _, err := countNativeCandidates(filepath.Join(t.TempDir(), "missing"), nil); err == nil {
+	if _, err := countNativeCandidates(t.Context(), filepath.Join(t.TempDir(), "missing"), nil); err == nil {
 		t.Fatal("unreadable sysfs must be an error, not zero candidates")
 	}
 }
@@ -323,6 +323,7 @@ func TestRescanDevicesReportsNewlySkippedVfioOnce(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(root, pf, "sriov_numvfs"), []byte("2"), 0600); err != nil {
 					t.Fatal(err)
 				}
+				completeSRIOVFixture(t, root, pf, 2)
 			case "missing IOMMU group":
 				if err := os.Remove(filepath.Join(root, vf, "iommu_group")); err != nil {
 					t.Fatal(err)
@@ -645,7 +646,8 @@ func TestPrepareRetriesCommonCDIAfterLateNativeDiscovery(t *testing.T) {
 	st.sysfsPCIDevicesRoot = writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:4d:00.0", "0")})
 	st.inventoryFn = inventoryOf(npuEntry("null", "0000:4d:00.0"))
 	groupCalls := 0
-	st.rsdGroupFn = func([]string) (string, error) { groupCalls++; return "/dev/null", nil }
+	st.resolveNodes = fixtureNativeNodes(st)
+	st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) { groupCalls++; return "/dev/null", nil }
 	rescan(t, st)
 	if _, err := st.Prepare(ctx, allocatedClaim()); err == nil || !strings.Contains(err.Error(), "common CDI") {
 		t.Fatalf("Prepare without the toolkit = %v", err)
@@ -697,7 +699,8 @@ func TestRescanFailurePreservesPreparedClaims(t *testing.T) {
 	if _, changed, err := st.RescanDevices(ctx); err == nil || changed || len(st.allocatable) != 1 {
 		t.Fatalf("failed scan: changed=%v err=%v devices=%v", changed, err, st.allocatable)
 	}
-	st.rsdGroupFn = func([]string) (string, error) {
+	st.resolveNodes = fixtureNativeNodes(st)
+	st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) {
 		t.Fatal("checkpoint replay must not recreate the group")
 		return "", nil
 	}
