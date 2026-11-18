@@ -50,8 +50,7 @@ func systemInventory(ctx context.Context, root string, known map[string]bool) (s
 		return s, err
 	}
 	for _, issue := range s.Issues {
-		var e *system.Error
-		if errors.As(issue.Err, &e) && e.Op == "device" && e.Kind == system.NotFound {
+		if errors.Is(issue.Err, system.ErrDeviceNotFound) {
 			continue
 		}
 		// Unknown functions with unreadable identity have never been advertised.

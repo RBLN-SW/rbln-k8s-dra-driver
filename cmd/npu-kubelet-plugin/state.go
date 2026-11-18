@@ -715,7 +715,7 @@ func npuDevicesFromInventory(ctx context.Context, sysfsRoot string, devs []devic
 		}
 		observed, err := machine.GetDevice(ctx, d.PCIBusID)
 		if err != nil {
-			if errors.Is(err, system.ErrNotFound) {
+			if errors.Is(err, system.ErrDeviceNotFound) {
 				skipped = append(skipped, skippedDevice{name: d.Name, pciBusID: d.PCIBusID, err: err})
 				continue
 			}
