@@ -98,7 +98,7 @@ func TestPrepareRejectsFailedRSDGroup(t *testing.T) {
 
 // The success path must be visible too: /dev/rsd0 is the thing operators check
 // first when peer communication misbehaves.
-func TestPrepareDevicesLogsCreatedRSDGroup(t *testing.T) {
+func TestPrepareDevicesLogsRSDGroup(t *testing.T) {
 	buf := logtest.Capture(t, "info")
 	st := prepareStateFor(t, "/dev/null")
 
@@ -106,9 +106,9 @@ func TestPrepareDevicesLogsCreatedRSDGroup(t *testing.T) {
 		t.Fatalf("prepareDevices: %v", err)
 	}
 
-	line := logtest.Find(logtest.Lines(t, buf), "Created RSD group device")
+	line := logtest.Find(logtest.Lines(t, buf), "Prepared RSD group device")
 	if line == nil {
-		t.Fatalf("RSD group creation was not logged: %s", buf.String())
+		t.Fatalf("prepared RSD group was not logged: %s", buf.String())
 	}
 	if line["hostRsdPath"] != "/dev/null" {
 		t.Errorf("hostRsdPath = %v, want /dev/null", line["hostRsdPath"])

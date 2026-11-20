@@ -7,7 +7,7 @@ import (
 	smi "github.com/rbln-sw/rblnlib-go/pkg/smi/v1"
 )
 
-func recreateValidatedRSDGroup(ctx context.Context, busIDs []string) (string, error) {
+func prepareRSDGroup(ctx context.Context, busIDs []string) (string, error) {
 	c, err := smi.New(smi.Options{ReplaceIntersectingGroups: true})
 	if err != nil {
 		return "", err
