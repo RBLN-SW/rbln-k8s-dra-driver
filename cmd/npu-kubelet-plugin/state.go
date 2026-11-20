@@ -180,7 +180,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		nodeName:                 config.flags.nodeName,
 		cdi:                      cdi,
 		checkpointManager:        checkpointManager,
-		rsdGroupFn:               recreateValidatedRSDGroup,
+		rsdGroupFn:               prepareRSDGroup,
 		inventoryFn:              inventoryFn,
 		npuDevices:               npuDevices,
 		vfioDevices:              vfioDevices,
@@ -464,12 +464,12 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		var err error
 		hostRsdPath, err = s.rsdGroupFn(ctx, npuBusIDs)
 		if err != nil {
-			return nil, fmt.Errorf("create RSD group for %v: %w", npuBusIDs, err)
+			return nil, fmt.Errorf("prepare RSD group for %v: %w", npuBusIDs, err)
 		}
 		if hostRsdPath == "" {
-			return nil, fmt.Errorf("RSD group creation returned no device path for %v", npuBusIDs)
+			return nil, fmt.Errorf("RSD group preparation returned no device path for %v", npuBusIDs)
 		}
-		logger.Info("Created RSD group device", "hostRsdPath", hostRsdPath, "busIDs", npuBusIDs)
+		logger.Info("Prepared RSD group device", "hostRsdPath", hostRsdPath, "busIDs", npuBusIDs)
 
 		// RDS, like the RSD group, only exists for devices driven by the
 		// rebellions kernel driver; a passthrough-only claim never needs it.
