@@ -15,7 +15,7 @@
 include $(CURDIR)/common.mk
 
 # Keep known command targets even when wildcard discovery behaves unexpectedly in CI.
-CMDS := $(sort npu-kubelet-plugin webhook $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/)))))
+CMDS := $(sort npu-kubelet-plugin rsd-claim-handoff webhook $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/)))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := vet lint

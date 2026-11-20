@@ -24,10 +24,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/RBLN-SW/k8s-dra-driver-npu/pkg/rsdview"
 	system "github.com/rbln-sw/rblnlib-go/pkg/system/v1"
+	"golang.org/x/sys/unix"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -479,6 +482,29 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		}
 	}
 
+	// Claim-scoped opt-in is recorded in every native CDI entry, so selecting
+	// any individual request also invokes the required start hook.
+	managed := claim.Annotations[rsdview.Annotation] == "v1"
+	if managed {
+		if len(npuBusIDs) == 0 || len(npuBusIDs) != len(results) {
+			return nil, errors.New("RSD request views require native allocations")
+		}
+		var st unix.Stat_t
+		if err := unix.Stat(hostRsdPath, &st); err != nil {
+			return nil, err
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFCHR {
+			return nil, errors.New("RSD group is not a character device")
+		}
+		group, ok := strings.CutPrefix(hostRsdPath, "/dev/rsd")
+		id, err := strconv.ParseUint(group, 10, 32)
+		if !ok || err != nil || id == 0 {
+			return nil, fmt.Errorf("invalid private RSD device %s", hostRsdPath)
+		}
+		if err := rsdview.Install(rsdview.State{UID: string(claim.UID), Group: group, Device: uint64(st.Rdev), Full: npuBusIDs}); err != nil {
+			return nil, err
+		}
+	}
 	// Metadata is per request: mount its files once, on the request's first
 	// vfio device, instead of duplicating them on every device.
 	metadataMounted := map[string]bool{}
@@ -504,6 +530,13 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			return nil, err
 		}
 
+		if managed {
+			address, err := devicePCIBusID(s.allocatable[result.Device])
+			if err != nil {
+				return nil, err
+			}
+			edits.Hooks = append(edits.Hooks, &cdispec.Hook{HookName: "createRuntime", Path: rsdview.Hook, Args: []string{rsdview.Hook, string(claim.UID), address}})
+		}
 		// RDS is a claim-scoped shared device (like /dev/rsd0); inject it once,
 		// and only for devices driven by the rebellions kernel driver.
 		if !vfio && !rdsInjected {
@@ -527,6 +560,16 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {
+	for _, d := range devices {
+		if d.ContainerEdits == nil || d.ContainerEdits.ContainerEdits == nil {
+			continue
+		}
+		for _, h := range d.ContainerEdits.Hooks {
+			if h.Path == rsdview.Hook {
+				return rsdview.Remove(claimUID)
+			}
+		}
+	}
 	return nil
 }
 
