@@ -35,3 +35,26 @@ func TestSelectionBindsAllAndOnlySelectedEntries(t *testing.T) {
 		})
 	}
 }
+
+func TestLeaseUsesProcessStartTimeAndAllowsCompatibleConsumers(t *testing.T) {
+	a, b := "0000:05:00.0", "0000:06:00.0"
+	lookup := func(pid int) (string, error) { return "100", nil }
+	for _, tc := range []struct {
+		name, recorded    string
+		wanted            []string
+		blocked, retained bool
+	}{
+		{"late wider consumer", "100", []string{a, b}, true, true},
+		{"same view", "100", []string{b}, false, true},
+		{"PID reused", "99", []string{a, b}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leases := map[string]rsdview.Lease{"owner": {PID: 123, Start: tc.recorded, Members: []string{b}}}
+			err := retainLiveLeases(leases, tc.wanted, "next", 432, "101", lookup)
+			_, exists := leases["owner"]
+			if (err != nil) != tc.blocked || exists != tc.retained {
+				t.Fatalf("got %v, retained=%v", err, exists)
+			}
+		})
+	}
+}

@@ -17,7 +17,7 @@ import (
 
 const (
 	Root       = "/run/rbln/rsd-view-v1"
-	Hook       = Root + "/verify"
+	Hook       = "/opt/rbln/oci-hooks/v1/rsd-claim-handoff"
 	Lock       = "/dev/.rbln-rsd-writer.lock"
 	Annotation = "npu.rebellions.ai/rsd-request-view"
 )
@@ -28,6 +28,7 @@ type Lease struct {
 	Members []string
 }
 type State struct {
+	Waiting                string
 	UID, Boot, Group       string
 	Device                 uint64
 	Full, Current, Pending []string
@@ -111,14 +112,6 @@ func Install(s State) error {
 	if !fi.IsDir() || fi.Mode().Perm() != 0700 {
 		return errors.New("invalid RSD runtime state directory")
 	}
-	binary, err := os.Open("/usr/bin/rsd-claim-handoff")
-	if err != nil {
-		return err
-	}
-	defer binary.Close()
-	if err = atomicFile(Hook, 0755, func(f *os.File) error { _, err := io.Copy(f, binary); return err }); err != nil {
-		return err
-	}
 	existing, err := Load(s.UID)
 	if err == nil {
 		if existing.Group == s.Group && existing.Device == s.Device && slices.Equal(existing.Full, s.Full) {
@@ -143,8 +136,29 @@ func Remove(uid string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Remove(path); errors.Is(err, os.ErrNotExist) {
-		return nil
+	for _, part := range []string{path + ".error", path} {
+		if err = os.Remove(part); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
-	return err
+	return nil
+}
+
+// InstallHook is run by the node installer. The privileged runtime executes
+// hooks only from the administrator-provisioned software directory.
+func InstallHook() error {
+	dir := filepath.Dir(Hook)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	source, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	src, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	return atomicFile(Hook, 0755, func(f *os.File) error { _, err := io.Copy(f, src); return err })
 }

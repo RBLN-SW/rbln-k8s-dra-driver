@@ -32,6 +32,8 @@ logging:
   format: json
 
 kubeletPlugin:
+  # Provision the host OCI hook for annotated native claims.
+  installRsdRequestViewHook: false
   priorityClassName: "system-node-critical"
   updateStrategy:
     type: RollingUpdate

@@ -36,6 +36,20 @@ spec:
       serviceAccountName: {{ include "k8s-dra-driver-npu.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.kubeletPlugin.podSecurityContext | nindent 8 }}
+      {{- if .Values.kubeletPlugin.installRsdRequestViewHook }}
+      initContainers:
+      - name: install-rsd-request-view-hook
+        image: {{ include "k8s-dra-driver-npu.fullimage" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["/usr/bin/rsd-claim-handoff", "install"]
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        volumeMounts:
+        - {name: rsd-view-hook, mountPath: /opt/rbln/oci-hooks/v1}
+      {{- end }}
       containers:
       - name: plugin
         securityContext:
@@ -98,6 +112,10 @@ spec:
         - name: kubevirt-dra-metadata
           mountPath: /var/run/kubernetes.io/dra-device-attributes
       volumes:
+      {{- if .Values.kubeletPlugin.installRsdRequestViewHook }}
+      - name: rsd-view-hook
+        hostPath: {path: /opt/rbln/oci-hooks/v1, type: DirectoryOrCreate}
+      {{- end }}
       - name: plugins-registry
         hostPath:
           path: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}

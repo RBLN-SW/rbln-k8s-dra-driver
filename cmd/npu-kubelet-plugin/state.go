@@ -454,6 +454,10 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		npuBusIDs = append(npuBusIDs, busID)
 	}
 
+	managed := claim.Annotations[rsdview.Annotation] == "v1"
+	if managed && (len(npuBusIDs) == 0 || len(npuBusIDs) != len(results)) {
+		return nil, errors.New("RSD request views require native allocations")
+	}
 	// Keep RSD member numbering stable regardless of allocation result order.
 	slices.Sort(npuBusIDs)
 	hostRsdPath := ""
@@ -484,11 +488,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 
 	// Claim-scoped opt-in is recorded in every native CDI entry, so selecting
 	// any individual request also invokes the required start hook.
-	managed := claim.Annotations[rsdview.Annotation] == "v1"
 	if managed {
-		if len(npuBusIDs) == 0 || len(npuBusIDs) != len(results) {
-			return nil, errors.New("RSD request views require native allocations")
-		}
 		var st unix.Stat_t
 		if err := unix.Stat(hostRsdPath, &st); err != nil {
 			return nil, err

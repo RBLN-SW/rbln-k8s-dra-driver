@@ -97,22 +97,37 @@ func selection(cfg *specs.Spec, uid, pci string, s rsdview.State) ([]string, err
 	return want, nil
 }
 
-func (p *probe) transact(ctx context.Context, s *rsdview.State, want []string, id string, pid int, start string) error {
-	for key, l := range s.Leases {
-		actual, err := processStart(l.PID)
+var errBusy = errors.New("live RSD consumer requires a different device set")
+
+func retainLiveLeases(leases map[string]rsdview.Lease, want []string, id string, pid int, start string, started func(int) (string, error)) error {
+	for key, l := range leases {
+		actual, err := started(l.PID)
 		if err != nil {
 			return err
 		}
 		if actual == "" || actual != l.Start {
-			delete(s.Leases, key)
+			delete(leases, key)
 			continue
 		}
 		if !slices.Equal(want, l.Members) {
-			return errors.New("live RSD consumer requires a different device set")
+			return errBusy
 		}
 		if key == id && (pid != l.PID || start != l.Start) {
 			return errors.New("OCI container ID collision")
 		}
+	}
+	return nil
+}
+
+func (p *probe) transact(ctx context.Context, s *rsdview.State, want []string, id string, pid int, start string) error {
+	if err := retainLiveLeases(s.Leases, want, id, pid, start, processStart); err != nil {
+		if errors.Is(err, errBusy) && s.Waiting != id {
+			s.Waiting = id
+			if saveErr := s.Save(); saveErr != nil {
+				return saveErr
+			}
+		}
+		return err
 	}
 	inv, err := p.read(ctx)
 	if err != nil {
@@ -150,7 +165,9 @@ func (p *probe) transact(ctx context.Context, s *rsdview.State, want []string, i
 		}
 		// Record both sides before the first SMI mutation. If interrupted after
 		// deletion, only this claim's journal can authorize rebuilding an empty slot.
-		s.Current = slices.Clone(current)
+		if len(current) > 0 {
+			s.Current = slices.Clone(current)
+		}
 		s.Pending = slices.Clone(want)
 		if err := s.Save(); err != nil {
 			return err
@@ -184,6 +201,9 @@ func (p *probe) transact(ctx context.Context, s *rsdview.State, want []string, i
 		return errors.New("RSD number changed after OCI device resolution")
 	}
 	s.Current = slices.Clone(want)
+	if s.Waiting == id {
+		s.Waiting = ""
+	}
 	s.Pending = nil
 	s.Leases[id] = rsdview.Lease{PID: pid, Start: start, Members: want}
 	return s.Save()
@@ -216,6 +236,23 @@ func run(ctx context.Context, args []string, input io.Reader) error {
 	if err = json.NewDecoder(f).Decode(&cfg); err != nil {
 		return err
 	}
+	// A runtime can surface a hook error as a terminal StartError for a
+	// restartPolicy Never Pod. Wait for short-lived claim contention before
+	// returning an error, and let unrelated transactions take the node lock.
+	for {
+		err = attempt(ctx, args, state, start, &cfg)
+		if !errors.Is(err, errBusy) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func attempt(ctx context.Context, args []string, state specs.State, start string, cfg *specs.Spec) error {
 	lock, err := os.OpenFile(rsdview.Lock, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0600)
 	if err != nil {
 		return err
@@ -239,7 +276,7 @@ func run(ctx context.Context, args []string, input io.Reader) error {
 	if err != nil {
 		return err
 	}
-	want, err := selection(&cfg, args[0], args[1], s)
+	want, err := selection(cfg, args[0], args[1], s)
 	if err != nil {
 		return err
 	}
@@ -253,10 +290,25 @@ func run(ctx context.Context, args []string, input io.Reader) error {
 }
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if len(os.Args) == 2 && os.Args[1] == "install" {
+		if err := rsdview.InstallHook(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	err := run(ctx, os.Args[1:], os.Stdin)
 	cancel()
 	if err != nil {
+		if len(os.Args) == 3 {
+			if path, e := rsdview.Path(os.Args[1]); e == nil {
+				if _, e = os.Stat(path); e == nil {
+					if logErr := os.WriteFile(path+".error", []byte(err.Error()), 0600); logErr != nil {
+						log.Print(logErr)
+					}
+				}
+			}
+		}
 		log.Fatal(err)
 	}
 }

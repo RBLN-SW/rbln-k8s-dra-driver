@@ -25,6 +25,7 @@ For a separate component deployment, use the [standalone chart guide](docs/guide
 | I want to… | Guide |
 | --- | --- |
 | Request one NPU | [Create a claim and Pod](examples/single-pod-single-npu.md) |
+| Select different native requests in an init and app container | [Experimental RSD request views](docs/guides/rsd-request-views.md) |
 | Request multiple NPUs | [Allocate two NPUs](examples/single-pod-double-npu.md) |
 | Select devices by product or topology | [Set allocation conditions](https://docs.rbln.ai/latest/software/system_management/kubernetes/tutorials/configure_dra_allocation.html) |
 | Request a virtual function | [Use an SR-IOV VF](examples/single-pod-npu-vf4.md) |
