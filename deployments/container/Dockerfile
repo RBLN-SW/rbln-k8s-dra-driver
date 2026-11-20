@@ -33,6 +33,8 @@ RUN mkdir /artifacts
 # VERSION still reaches main.version through the Makefile's linker flags.
 RUN GOFLAGS=-buildvcs=false make PREFIX=/artifacts VERSION="$VERSION" GOARCH="$TARGETARCH" cmds
 
+RUN cd poc/rsd-claim-handoff && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -buildvcs=false -trimpath -o /artifacts/rsd-claim-handoff .
+
 FROM ${BASE_IMAGE}
 
 # docker.io/ubuntu:22.04 is republished on Canonical's cadence, so a package fix
@@ -53,4 +55,5 @@ LABEL summary="Rebellions NPU DRA resource driver for Kubernetes"
 LABEL description="See summary"
 
 COPY --from=build /artifacts/npu-kubelet-plugin /usr/bin/npu-kubelet-plugin
+COPY --from=build /artifacts/rsd-claim-handoff /usr/bin/rsd-claim-handoff
 COPY --from=build /artifacts/webhook       /usr/bin/webhook

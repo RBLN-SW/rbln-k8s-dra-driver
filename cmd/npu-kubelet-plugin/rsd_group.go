@@ -8,7 +8,7 @@ import (
 )
 
 func prepareRSDGroup(ctx context.Context, busIDs []string) (string, error) {
-	c, err := smi.New(smi.Options{ReplaceIntersectingGroups: true})
+	c, err := smi.New(smi.Options{ReplaceIntersectingGroups: true, LockPath: "/run/rbln/.dra-handoff-poc.lock"})
 	if err != nil {
 		return "", err
 	}
