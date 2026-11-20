@@ -204,13 +204,21 @@ func (p *probe) prepare(ctx context.Context, name string) error {
 		return err
 	}
 	if string(pod.UID) != p.uid || pod.Spec.NodeName != p.node || pod.DeletionTimestamp != nil || pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
-		len(pod.Spec.InitContainers) != 1 || len(pod.Spec.Containers) != 1 || len(pod.Spec.EphemeralContainers) != 0 || pod.Spec.InitContainers[0].RestartPolicy != nil ||
-		pod.Spec.InitContainers[0].Name != "init-npu" || pod.Spec.Containers[0].Name != "ctr0" ||
+		len(pod.Spec.InitContainers) > 1 || len(pod.Spec.Containers) != 1 || len(pod.Spec.EphemeralContainers) != 0 || pod.Spec.Containers[0].Name != "ctr0" ||
 		len(pod.Spec.ResourceClaims) != 1 || pod.Spec.ResourceClaims[0].ResourceClaimName == nil || *pod.Spec.ResourceClaims[0].ResourceClaimName != p.claim {
 		return errors.New("enrolled Pod topology changed")
 	}
-	c := pod.Spec.InitContainers[0]
-	if name == "ctr0" {
+	c := pod.Spec.Containers[0]
+	if len(pod.Spec.InitContainers) == 1 && (pod.Spec.InitContainers[0].RestartPolicy != nil || pod.Spec.InitContainers[0].Name != "init-npu") {
+		return errors.New("only regular, sequential init containers are supported by this experiment")
+	}
+	if name == "init-npu" {
+		if len(pod.Spec.InitContainers) == 0 {
+			return errors.New("unexpected init callback")
+		}
+		c = pod.Spec.InitContainers[0]
+	}
+	if name == "ctr0" && len(pod.Spec.InitContainers) > 0 {
 		finished := p.initStopped
 		for _, s := range pod.Status.InitContainerStatuses {
 			if s.Name == "init-npu" && s.State.Terminated != nil && s.State.Terminated.ExitCode == 0 {
@@ -307,6 +315,7 @@ func (p *probe) prepare(ctx context.Context, name string) error {
 	}
 	if !slices.Equal(current, want) {
 		if len(claim.Status.ReservedFor) != 1 {
+			log.Printf("shared-claim guard kept slot %s for %d consumers", p.group, len(claim.Status.ReservedFor))
 			return errors.New("another consumer is reserved; retaining existing group")
 		}
 		if _, err = p.command(ctx, "group", "-d", p.group); err != nil {
