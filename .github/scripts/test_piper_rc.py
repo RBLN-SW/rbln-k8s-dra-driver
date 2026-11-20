@@ -40,12 +40,13 @@ class Fake:
         self.calls = []
         self.bootstrap = True
         self.entrypoint = True
+        self.steps = {"total": 1, "items": [{"command": "make ci"}]}
         self.trigger_error = None
 
     def request(self, method, path, payload=None):
         self.calls.append((method, path, payload))
         if path == "/api/bundles/bundle":
-            return {"repository_id": "repository", "ob_pipeline": "pr-device",
+            return {"repository_id": "repository", "ob_pipeline": "pr-device", "name": "pr",
                     "pipelines": [{"id": "pipeline"}]}
         if path == "/api/repositories/repository":
             return {"owner": "RBLN-SW", "name": "k8s-device-plugin"}
@@ -55,6 +56,8 @@ class Fake:
             return {"yaml": "steps: []", "warnings": []}
         if path.endswith("/ob/bootstrap"):
             return {"matches": self.entrypoint}
+        if path == "/api/ob/pipelines/pr-device/steps":
+            return self.steps
         if path.endswith("/bootstrap"):
             return {"matches": self.bootstrap}
         if path.endswith("/trigger"):
@@ -173,6 +176,24 @@ class PayloadTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_direct_ob_bootstrap_must_fetch_this_bundle_and_forward_the_run(self):
+        command = ('set -euo pipefail\ncurl -fsSL -H "Authorization: [redacted]\n'
+                   '  "${PIPER_URL}/api/v1/bundles/RBLN-SW/k8s-device-plugin/pr?run=$${PIPER_RUN:-}"'
+                   ' | buildkite-agent pipeline upload\n')
+        api = Fake()
+        api.entrypoint = False
+        root, bundle, _ = rc.prepare(api, CONFIG, ENV)
+        api.steps["items"][0]["command"] = command
+        rc.ensure_bootstrap(api, root, bundle, CONFIG)
+        for old, new in [("pr?", "nightly?"), ("k8s-device-plugin", "other"),
+                         ("?run=$${PIPER_RUN:-}", ""), ("pipeline upload", "cat")]:
+            with self.subTest(new=new), self.assertRaisesRegex(ValueError, "PIPER_RUN"):
+                api.steps["items"][0]["command"] = command.replace(old, new)
+                rc.ensure_bootstrap(api, root, bundle, CONFIG)
+        api.steps = {"total": 2, "items": [{"command": command}], "truncated": True}
+        with self.assertRaises(ValueError):
+            rc.ensure_bootstrap(api, root, bundle, CONFIG)
+
     def test_dry_run_only_reads_and_previews(self):
         api = Fake()
         with redirect_stdout(io.StringIO()):
@@ -241,6 +262,32 @@ class ExecutionTests(unittest.TestCase):
             rc.wait_result(Poll(), "/api/bundles/bundle", BUILD,
                            rc.request_payload(CONFIG, ENV, [PIPELINE]), 30,
                            clock=clock.time, sleep=clock.sleep)
+
+    def test_native_ob_verdict_requires_github_status_for_this_build_and_sha(self):
+        class Piper:
+            def request(self, method, path):
+                if "/builds/" in path:
+                    return {"number": 42, "state": "passed"}
+                return {"id": "run42", "ob_build": 42, "renders": 1}
+
+        clock = Clock()
+        calls = []
+        class GitHub:
+            def request(self, method, path):
+                calls.append((method, path))
+                if path.endswith("page=1"):
+                    return [{"context": "rc-validation", "state": "success",
+                             "target_url": "https://ob.example/builds/41"}] * 100
+                return [{"context": "other", "state": "success", "target_url": BUILD["url"]},
+                        {"context": "rc-validation", "state": "success" if clock.now else "pending",
+                         "target_url": BUILD["url"]}]
+
+        payload = rc.request_payload(CONFIG, ENV, [PIPELINE])
+        result = rc.wait_result(Piper(), "/bundle", BUILD, payload, 30, github=GitHub(),
+                                clock=clock.time, sleep=clock.sleep)
+        self.assertEqual(result, ("passed", "success"))
+        path = f"/repos/{CONFIG['repository']}/commits/{SHA}/statuses?per_page=100&page="
+        self.assertEqual(calls, [("GET", path + "1"), ("GET", path + "2")] * 2)
 
     def test_only_older_operator_rcs_are_canceled(self):
         class Builds:
