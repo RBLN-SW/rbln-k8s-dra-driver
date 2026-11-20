@@ -54,6 +54,9 @@ jobs:
   # disable rebuilding and target the release commit's rc-validation status.
   rc-validate:
     name: piper RC validation
+    permissions:
+      contents: read
+      statuses: read
     needs: release
     if: needs.release.outputs.kind == 'rc'
     runs-on: rbln-sw-k8s-general
@@ -70,6 +73,7 @@ jobs:
         env:
           PIPER_URL: ${{ vars.PIPER_URL || 'https://piper.k8s.rebellions.in' }}
           PIPER_TOKEN: ${{ secrets.PIPER_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }} # Read native OB commit statuses.
           PIPER_RC_BUNDLE_ID: ${{ vars.PIPER_RC_BUNDLE_ID }}
           RC_TAG: ${{ github.ref_name }}
           RC_SHA: ${{ needs.release.outputs.sha }}
