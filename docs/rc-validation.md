@@ -16,10 +16,9 @@ or implement a separate test-report verdict.
   the helper verifies the execution repository and OB link.
 - `CLOUD_COMPONENT_HARBOR_REGISTRY` is the same host/project used by the release
   kit to publish images. Registry credentials remain managed by piper/OB.
-- Merge the bootstrap into the branch/commit OB will check out, sync that
-  repository in piper, and switch the OB entry point to that bootstrap.
-  It must forward `?run=$PIPER_RUN`. The helper fails before triggering if the
-  recorded bootstrap or OB entry point is not ready.
+- Sync the execution repository's bootstrap in piper. OB can upload that file
+  or use its standard direct command to fetch the same bundle and forward
+  `?run=$${PIPER_RUN:-}` to piper. The helper checks the entry point before triggering.
 - Release branches need this workflow, helper and bootstrap before creating a
   new RC. An old RC tag still contains its old workflow.
 - `RC_VALIDATION_SENTINEL_REF` optionally overrides the harness ref on every
@@ -46,8 +45,10 @@ compiler/cluster baseline is preserved.
 ## Result and retries
 
 The trigger's HTTP 201 means a build was created. The helper records its build
-URL and run ID, then reads that exact build/run until piper has delivered the
-matching final `rc-validation` status. Success exits zero; the existing OB
+URL and run ID, then waits for that build and its matching final `rc-validation`
+status. When OB delivers the status directly, the helper uses the workflow's
+`GITHUB_TOKEN` (with `statuses: read`) to check the RC commit, context and OB
+build URL on GitHub. Success exits zero; the existing OB
 failure/error result exits nonzero. Cleanup/notification failures are part of
 the normal piper/OB result. No coverage-count or custom RC verdict is added.
 
