@@ -14,7 +14,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type probe struct{ binary string }
+type probe struct{ driverRoot bool }
+
 type device struct {
 	Name  string      `json:"device"`
 	Group json.Number `json:"group_id"`
@@ -25,7 +26,12 @@ type device struct {
 }
 
 func (p *probe) command(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, p.binary, args...)
+	var cmd *exec.Cmd
+	if p.driverRoot {
+		cmd = exec.CommandContext(ctx, "/run/rbln/driver/usr/bin/rbln-smi", args...)
+	} else {
+		cmd = exec.CommandContext(ctx, "/usr/bin/rbln-smi", args...)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("SMI %q: %w: %.600s", args, err, out)

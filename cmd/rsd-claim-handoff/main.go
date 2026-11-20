@@ -282,7 +282,7 @@ func attempt(ctx context.Context, args []string, state specs.State, start string
 	}
 	for _, path := range []string{"/usr/bin/rbln-smi", "/run/rbln/driver/usr/bin/rbln-smi"} {
 		if f, err := os.Stat(path); err == nil && f.Mode().IsRegular() && f.Mode().Perm()&0111 != 0 {
-			p := probe{binary: path}
+			p := probe{driverRoot: path == "/run/rbln/driver/usr/bin/rbln-smi"}
 			return p.transact(ctx, &s, want, state.ID, state.Pid, start)
 		}
 	}
