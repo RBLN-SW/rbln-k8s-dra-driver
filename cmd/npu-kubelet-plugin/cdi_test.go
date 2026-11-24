@@ -25,15 +25,15 @@ devices:
       options: [ro, nosuid]
       type: bind
     hooks:
-    - hookname: createContainer
+    - hookName: createContainer
       path: /usr/bin/rbln-ctk
       args: [rbln-ctk, hook]
 `
 
-func cdiHandlerWithRuntimeSpec(t *testing.T) *CDIHandler {
+func cdiHandlerWithRuntimeSpec(t *testing.T, fixture string) *CDIHandler {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, rblnRuntimeSpecFile), []byte(runtimeSpecFixture), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, rblnRuntimeSpecFile), []byte(fixture), 0o600); err != nil {
 		t.Fatalf("write runtime spec fixture: %v", err)
 	}
 	cdi, err := NewCDIHandler(root, "npu")
@@ -49,7 +49,7 @@ func cdiHandlerWithRuntimeSpec(t *testing.T) *CDIHandler {
 // the spec or the runtime ignored it.
 func TestCreateClaimSpecFileLogsInjectedDevices(t *testing.T) {
 	buf := logtest.Capture(t, "debug")
-	cdi := cdiHandlerWithRuntimeSpec(t)
+	cdi := cdiHandlerWithRuntimeSpec(t, runtimeSpecFixture)
 
 	devices := PreparedDevices{{
 		Device: drapbv1.Device{DeviceName: "null", PoolName: "node-1"},
@@ -79,7 +79,7 @@ func TestCreateClaimSpecFileLogsInjectedDevices(t *testing.T) {
 
 func TestDeleteClaimSpecFileLogs(t *testing.T) {
 	buf := logtest.Capture(t, "debug")
-	cdi := cdiHandlerWithRuntimeSpec(t)
+	cdi := cdiHandlerWithRuntimeSpec(t, runtimeSpecFixture)
 
 	if err := cdi.CreateClaimSpecFile(context.Background(), "claim-uid-5", nil); err != nil {
 		t.Fatalf("CreateClaimSpecFile: %v", err)
@@ -97,7 +97,7 @@ func TestDeleteClaimSpecFileLogs(t *testing.T) {
 // down; "container cannot find the userspace library" starts here.
 func TestCreateCommonSpecFileLogsRuntimeEdits(t *testing.T) {
 	buf := logtest.Capture(t, "debug")
-	cdi := cdiHandlerWithRuntimeSpec(t)
+	cdi := cdiHandlerWithRuntimeSpec(t, runtimeSpecFixture)
 
 	if err := cdi.CreateCommonSpecFile(context.Background()); err != nil {
 		t.Fatalf("CreateCommonSpecFile: %v", err)
@@ -112,6 +112,30 @@ func TestCreateCommonSpecFileLogsRuntimeEdits(t *testing.T) {
 	}
 	if line["hooks"] != float64(1) {
 		t.Errorf("hooks = %v, want 1", line["hooks"])
+	}
+}
+
+func TestCommonSpecPreservesToolkitHookName(t *testing.T) {
+	for _, key := range []string{"hookName", "hookname"} {
+		t.Run(key, func(t *testing.T) {
+			fixture := strings.Replace(runtimeSpecFixture, "hookName:", key+":", 1)
+			cdi := cdiHandlerWithRuntimeSpec(t, fixture)
+			if err := cdi.CreateCommonSpecFile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			// Load the published spec as a new CDI consumer would.
+			cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdi.root), cdiapi.WithAutoRefresh(false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			device := cache.GetDevice(cdi.kind() + "=" + cdiCommonDeviceName)
+			if device == nil || len(device.ContainerEdits.Hooks) != 1 {
+				t.Fatalf("expected one hook in common CDI device, got %+v", device)
+			}
+			if name := device.ContainerEdits.Hooks[0].HookName; name != "createContainer" {
+				t.Errorf("hook name = %q, want createContainer", name)
+			}
+		})
 	}
 }
 

@@ -24,7 +24,7 @@ func prepareStateFor(t *testing.T, rsdPath string) *DeviceState {
 	st := newTestState(t)
 	st.nodeName = "node-1"
 	st.sysfsPCIDevicesRoot = writeFakeSysfs(t, []fakePCIDevice{nativeDevice("0000:4d:00.0", "0")})
-	st.cdi = cdiHandlerWithRuntimeSpec(t)
+	st.cdi = cdiHandlerWithRuntimeSpec(t, runtimeSpecFixture)
 	st.resolveNodes = fixtureNativeNodes(st)
 	st.rsdGroupFn = func(_ context.Context, _ []string) (string, error) { return rsdPath, nil }
 	st.allocatable = AllocatableDevices{
