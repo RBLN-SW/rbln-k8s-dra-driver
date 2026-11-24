@@ -17,6 +17,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -126,11 +127,12 @@ type rblnRuntimeMount struct {
 }
 
 type rblnRuntimeHook struct {
-	HookName string   `yaml:"hookname"`
-	Path     string   `yaml:"path"`
-	Args     []string `yaml:"args"`
-	Env      []string `yaml:"env"`
-	Timeout  *int     `yaml:"timeout"`
+	HookName       string   `yaml:"hookName"`
+	LegacyHookName string   `yaml:"hookname"` // Written by rbln-container-toolkit before v0.2.7.
+	Path           string   `yaml:"path"`
+	Args           []string `yaml:"args"`
+	Env            []string `yaml:"env"`
+	Timeout        *int     `yaml:"timeout"`
 }
 
 func (cdi *CDIHandler) getRuntimeUMDEdits() ([]*cdispec.Mount, []*cdispec.Hook, error) {
@@ -166,7 +168,7 @@ func (cdi *CDIHandler) getRuntimeUMDEdits() ([]*cdispec.Mount, []*cdispec.Hook, 
 		hooks := make([]*cdispec.Hook, 0, len(device.ContainerEdits.Hooks))
 		for _, hook := range device.ContainerEdits.Hooks {
 			hooks = append(hooks, &cdispec.Hook{
-				HookName: hook.HookName,
+				HookName: cmp.Or(hook.HookName, hook.LegacyHookName),
 				Path:     hook.Path,
 				Args:     append([]string{}, hook.Args...),
 				Env:      append([]string{}, hook.Env...),
