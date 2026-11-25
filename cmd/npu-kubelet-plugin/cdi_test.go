@@ -139,6 +139,100 @@ func TestCommonSpecPreservesToolkitHookName(t *testing.T) {
 	}
 }
 
+// runtimeSpecMixedFixture carries edits at both levels, the way `rbln-ctk cdi
+// generate` lays out rbln.yaml (spec-level UMD edits, deviceNodes on the device).
+const runtimeSpecMixedFixture = `cdiVersion: 0.6.0
+kind: rebellions.ai/npu
+containerEdits:
+  mounts:
+  - hostPath: /usr/lib/rbln/librbln.so
+    containerPath: /usr/lib/rbln/librbln.so
+    options: [ro, nosuid]
+    type: bind
+  hooks:
+  - hookName: createContainer
+    path: /usr/bin/rbln-ctk
+    args: [rbln-ctk, hook, spec-level]
+devices:
+- name: runtime
+  containerEdits:
+    deviceNodes:
+    - path: /dev/rbln0
+      hostPath: /dev/rbln0
+    mounts:
+    - hostPath: /usr/lib/rbln
+      containerPath: /usr/lib/rbln
+      options: [ro, nosuid]
+      type: bind
+    hooks:
+    - hookName: createContainer
+      path: /usr/bin/rbln-ctk
+      args: [rbln-ctk, hook, device-level]
+`
+
+// The CLI layout keeps the UMD edits at spec level. The common device must
+// carry them in CDI order (spec level first), with either hook name spelling,
+// and must not pick up the CLI's device node.
+func TestCommonSpecMergesSpecLevelEdits(t *testing.T) {
+	for _, key := range []string{"hookName", "hookname"} {
+		t.Run(key, func(t *testing.T) {
+			fixture := strings.ReplaceAll(runtimeSpecMixedFixture, "hookName:", key+":")
+			cdi := cdiHandlerWithRuntimeSpec(t, fixture)
+			if err := cdi.CreateCommonSpecFile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdi.root), cdiapi.WithAutoRefresh(false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			device := cache.GetDevice(cdi.kind() + "=" + cdiCommonDeviceName)
+			if device == nil {
+				t.Fatal("common CDI device not published")
+			}
+			edits := device.ContainerEdits
+
+			wantMounts := []string{"/usr/lib/rbln/librbln.so", "/usr/lib/rbln"}
+			if len(edits.Mounts) != len(wantMounts) {
+				t.Fatalf("got %d mounts, want %d: %+v", len(edits.Mounts), len(wantMounts), edits.Mounts)
+			}
+			for i, want := range wantMounts {
+				if edits.Mounts[i].HostPath != want {
+					t.Errorf("mount[%d] = %q, want %q", i, edits.Mounts[i].HostPath, want)
+				}
+			}
+
+			wantHookArgs := []string{"spec-level", "device-level"}
+			if len(edits.Hooks) != len(wantHookArgs) {
+				t.Fatalf("got %d hooks, want %d: %+v", len(edits.Hooks), len(wantHookArgs), edits.Hooks)
+			}
+			for i, want := range wantHookArgs {
+				if edits.Hooks[i].HookName != "createContainer" {
+					t.Errorf("hook[%d] name = %q, want createContainer", i, edits.Hooks[i].HookName)
+				}
+				if args := edits.Hooks[i].Args; len(args) == 0 || args[len(args)-1] != want {
+					t.Errorf("hook[%d] args = %v, want last arg %q", i, args, want)
+				}
+			}
+
+			if len(edits.DeviceNodes) != 0 {
+				t.Errorf("common device carries device nodes %+v, want none", edits.DeviceNodes)
+			}
+		})
+	}
+}
+
+// Spec-level edits without a runtime entry is not a layout the toolkit writes;
+// the plugin keeps reporting it instead of guessing.
+func TestCommonSpecRequiresRuntimeDevice(t *testing.T) {
+	specLevelOnly, _, _ := strings.Cut(runtimeSpecMixedFixture, "devices:")
+	fixture := specLevelOnly + "devices: []\n"
+	cdi := cdiHandlerWithRuntimeSpec(t, fixture)
+	err := cdi.CreateCommonSpecFile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `runtime device "runtime" not found`) {
+		t.Fatalf("err = %v, want runtime device not found", err)
+	}
+}
+
 // testRDSSpec mirrors the rbln-rds.yaml the RBLN container toolkit emits.
 const testRDSSpec = `cdiVersion: "0.6.0"
 kind: rebellions.ai/rds
