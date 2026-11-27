@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 
@@ -105,8 +106,12 @@ func (cdi *CDIHandler) CreateCommonSpecFile(ctx context.Context) error {
 }
 
 type rblnRuntimeSpec struct {
-	Kind    string              `yaml:"kind"`
-	Devices []rblnRuntimeDevice `yaml:"devices"`
+	Kind string `yaml:"kind"`
+	// ContainerEdits holds the spec-level edits. `rbln-ctk cdi generate` writes
+	// the UMD mounts and hooks here and leaves only deviceNodes on the "runtime"
+	// device; the daemon writes them on the device instead.
+	ContainerEdits rblnRuntimeDeviceEdits `yaml:"containerEdits"`
+	Devices        []rblnRuntimeDevice    `yaml:"devices"`
 }
 
 type rblnRuntimeDevice struct {
@@ -155,8 +160,12 @@ func (cdi *CDIHandler) getRuntimeUMDEdits() ([]*cdispec.Mount, []*cdispec.Hook, 
 			continue
 		}
 
-		mounts := make([]*cdispec.Mount, 0, len(device.ContainerEdits.Mounts))
-		for _, mount := range device.ContainerEdits.Mounts {
+		// CDI applies the spec-level edits first and the device's own edits after them.
+		mountSpecs := slices.Concat(runtimeSpec.ContainerEdits.Mounts, device.ContainerEdits.Mounts)
+		hookSpecs := slices.Concat(runtimeSpec.ContainerEdits.Hooks, device.ContainerEdits.Hooks)
+
+		mounts := make([]*cdispec.Mount, 0, len(mountSpecs))
+		for _, mount := range mountSpecs {
 			mounts = append(mounts, &cdispec.Mount{
 				HostPath:      mount.HostPath,
 				ContainerPath: mount.ContainerPath,
@@ -165,8 +174,8 @@ func (cdi *CDIHandler) getRuntimeUMDEdits() ([]*cdispec.Mount, []*cdispec.Hook, 
 			})
 		}
 
-		hooks := make([]*cdispec.Hook, 0, len(device.ContainerEdits.Hooks))
-		for _, hook := range device.ContainerEdits.Hooks {
+		hooks := make([]*cdispec.Hook, 0, len(hookSpecs))
+		for _, hook := range hookSpecs {
 			hooks = append(hooks, &cdispec.Hook{
 				HookName: cmp.Or(hook.HookName, hook.LegacyHookName),
 				Path:     hook.Path,
